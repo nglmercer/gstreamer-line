@@ -4,7 +4,6 @@ import { isCodecDecoderAvailable, getCodecDecoder } from "../../__test__/setup.j
 
 // Simple logger instance - Enable debug mode to see detailed logs
 const logger = new Logger(false, "[RTMP]");
-const wsLogger = new Logger(true, "[WS]");
 
 // RTMP Constants
 const RTMP_HANDSHAKE_SIZE = 1536;
@@ -43,26 +42,35 @@ class StreamProcessor {
   private pipelineInitialized: boolean = false;
   private streamingStarted: boolean = false;
   private streamingInterval: NodeJS.Timeout | null = null;
-  private wsClients: Set<any> = new Set();
+  private sequenceHeaderReceived: boolean = false;
+  private frameCount: number = 0;
+  private outputDir: string = "./temp_frames";
 
-  constructor() {}
-
-  // Add WebSocket client
-  addClient(ws: any) {
-    this.wsClients.add(ws);
-    wsLogger.info(`WebSocket client added. Total clients: ${this.wsClients.size}`);
+  constructor() {
+    // Create output directory if it doesn't exist
+    this.ensureOutputDirectory();
   }
 
-  // Remove WebSocket client
-  removeClient(ws: any) {
-    this.wsClients.delete(ws);
-    wsLogger.info(`WebSocket client removed. Total clients: ${this.wsClients.size}`);
+  private async ensureOutputDirectory() {
+    try {
+      const dirPath = this.outputDir;
+      const gitkeepPath = `${dirPath}/.gitkeep`;
+      
+      // Try to create the directory and .gitkeep file
+      await Bun.write(gitkeepPath, "");
+      
+      // Verify the directory was created
+      const exists = await Bun.file(gitkeepPath).exists();
+      if (exists) {
+        console.log(`✅ Output directory ready: ${dirPath}`);
+      } else {
+        console.warn(`⚠️  Could not create output directory: ${dirPath}`);
+      }
+    } catch (error) {
+      console.error(`❌ Error creating output directory:`, error);
+    }
   }
 
-  // Get number of connected clients
-  getClientCount(): number {
-    return this.wsClients.size;
-  }
 
   async initialize(streamKey: string): Promise<void> {
     if (this.pipelineInitialized) {
@@ -95,38 +103,51 @@ class StreamProcessor {
       const pipelineString = `
         appsrc name=src format=bytes is-live=true do-timestamp=true caps="video/x-h264,stream-format=avc,alignment=au" !
         h264parse !
-        video/x-h264,stream-format=byte-stream,alignment=au !
         ${h264Decoder} !
         videoconvert !
         videoscale !
-        video/x-raw,format=RGBA,width=320,height=240 !
-        appsink name=sink emit-signals=true sync=false max-buffers=10
+        video/x-raw,format=RGBA,width=320,height=240,framerate=30/1 !
+        appsink name=sink emit-signals=true sync=false max-buffers=10 drop=true
       `;
 
       this.gstKit.setPipeline(pipelineString);
+      
+      // Start the pipeline immediately
       this.gstKit.play();
+      
+      // Wait a bit for pipeline to initialize
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Check state
+      const state = this.gstKit?.getState();
+      console.log(`Pipeline state: ${state}`);
+      
       this.pipelineInitialized = true;
       logger.info(`GStreamer pipeline initialized for stream: ${streamKey} (using decoder: ${h264Decoder})`);
     } catch (error) {
       logger.error("Failed to initialize GStreamer pipeline", error);
       this.cleanup();
+      throw error;
     }
   }
 
   // Start streaming when data is available
   startStreaming(): void {
     if (this.streamingStarted || !this.pipelineInitialized || !this.gstKit) {
-      logger.warn("Cannot start streaming: already started or not initialized");
+      return;
+    }
+
+    // Wait for sequence header before starting frame extraction
+    if (!this.sequenceHeaderReceived) {
       return;
     }
 
     this.streamingStarted = true;
-    logger.info("Starting frame extraction loop");
+    console.log('Starting frame extraction...');
 
-    let frameCount = 0;
     const frameInterval = 1000 / FRAME_RATE; // ms between frames (~33.33ms for 30fps)
 
-    // Wait a bit for the decoder to initialize before starting the loop
+    // Wait for decoder to initialize before starting the loop
     setTimeout(() => {
       this.streamingInterval = setInterval(() => {
       if (!this.pipelineInitialized || !this.gstKit) {
@@ -137,53 +158,47 @@ class StreamProcessor {
         const frame = this.gstKit.pullSample("sink", 100); // 100ms timeout
 
         if (frame) {
-          frameCount++;
+          this.frameCount++;
           
-          // Broadcast frame to all WebSocket clients
-          this.broadcastFrame(frame);
+          // Save frame as temporary image file
+          this.saveFrameAsImage(frame);
 
-          // Send progress updates every 30 frames (1 second at 30fps)
-          if (frameCount % 30 === 0) {
-            wsLogger.log(`📹 Streamed ${frameCount} frames (last frame size: ${frame.length} bytes, clients: ${this.wsClients.size})`);
-          }
-        } else {
-          // Log every 5 seconds if no frames
-          if (frameCount % 150 === 0) {
-            wsLogger.warn(`⚠️  No frame available (total streamed: ${frameCount})`);
+          // Log progress every 30 frames
+          if (this.frameCount % 30 === 0) {
+            console.log(`📹 Processed ${this.frameCount} frames`);
           }
         }
       } catch (error) {
-        wsLogger.error("Error pulling frame from pipeline", error);
+        console.error("Error pulling frame:", error);
       }
     }, frameInterval);
-    }, 500); // 500ms delay to allow decoder to initialize
+    }, 1000); // 1 second delay to allow decoder to initialize
   }
 
-  private broadcastFrame(frameBuffer: Buffer) {
-    const base64 = frameBuffer.toString('base64');
-    const message = JSON.stringify({ type: 'frame', data: base64 });
-
-    for (const client of this.wsClients) {
-      if (client.readyState === 1) { // WebSocket.OPEN
-        try {
-          client.send(message);
-        } catch (error) {
-          wsLogger.error('Failed to send frame to client:', error);
-          this.wsClients.delete(client);
-        }
+  private async saveFrameAsImage(frameBuffer: Buffer) {
+    try {
+      // Create filename with timestamp and frame number
+      const timestamp = Date.now();
+      const filename = `${this.outputDir}/frame_${this.frameCount.toString().padStart(6, '0')}_${timestamp}.rgba`;
+      
+      // Write the RGBA buffer to a file
+      await Bun.write(filename, frameBuffer);
+      
+      // Verify the file was written
+      const fileExists = await Bun.file(filename).exists();
+      
+      // Log every 30 frames
+      if (this.frameCount % 30 === 0) {
+        console.log(`💾 Saved frame ${this.frameCount} to ${filename} (${frameBuffer.length} bytes, exists: ${fileExists})`);
       }
+    } catch (error) {
+      console.error('❌ Error saving frame:', error);
     }
   }
 
   processVideoBuffer(buffer: Buffer): void {
     if (!this.pipelineInitialized || !this.gstKit) {
-      logger.warn(`Pipeline not initialized, dropping ${buffer.length} bytes of video data`);
       return;
-    }
-
-    // Start streaming if not already started
-    if (!this.streamingStarted) {
-      this.startStreaming();
     }
 
     try {
@@ -194,37 +209,39 @@ class StreamProcessor {
       // Bytes 4+: H.264 data in AVCC format (with length prefixes)
       
       if (buffer.length > 4) {
-        const frameType = buffer[0];
         const avcPacketType = buffer[1];
         
         // Skip RTMP header (4 bytes) and extract H.264 data
-        // The H.264 data is in AVCC format with length prefixes, no start codes needed
         const h264Data = buffer.subarray(4);
         
-        console.log(`[PIPELINE] Pushing ${h264Data.length} bytes (frameType=0x${frameType.toString(16)}, avcType=${avcPacketType})`);
+        // Check if this is a sequence header (SPS/PPS)
+        if (avcPacketType === 0 && !this.sequenceHeaderReceived) {
+          this.sequenceHeaderReceived = true;
+          console.log('Sequence header received');
+        }
+        
         this.gstKit.pushSample("src", h264Data);
+        
+        // Start streaming after sequence header is received
+        if (this.sequenceHeaderReceived && !this.streamingStarted) {
+          this.startStreaming();
+        }
       }
     } catch (error) {
-      console.error(`[PIPELINE ERROR] Failed to process video buffer:`, error);
+      console.error('Error processing video buffer:', error);
     }
   }
 
   processAudioBuffer(buffer: Buffer): void {
-    if (!this.pipelineInitialized || !this.gstKit) return;
-
-    try {
-      this.gstKit.pushSample("src", buffer);
-      logger.log(`Processed audio buffer: ${buffer.length} bytes`);
-    } catch (error) {
-      logger.error("Failed to process audio buffer", error);
-    }
+    // Audio is not processed, only video
+    return;
   }
 
   // Method to check pipeline status
-  getPipelineStatus(): { initialized: boolean; hasClients: boolean } {
+  getPipelineStatus(): { initialized: boolean; frameCount: number } {
     return {
       initialized: this.pipelineInitialized,
-      hasClients: this.wsClients.size > 0
+      frameCount: this.frameCount
     };
   }
 
@@ -290,7 +307,7 @@ class RTMPConnection {
     if (this.handshakeState !== HandshakeState.HANDSHAKE_DONE) {
       this.processHandshake();
     } else {
-      this.processRTMPMessages();
+      await this.processRTMPMessages();
     }
   }
 
@@ -395,6 +412,10 @@ class RTMPConnection {
   }
 
   private async processRTMPMessages() {
+    await this.processRTMPMessagesLoop();
+  }
+
+  private async processRTMPMessagesLoop() {
     while (this.buffer.length > 0) {
       const startLen = this.buffer.length;
 
@@ -484,7 +505,7 @@ class RTMPConnection {
 
       if (!incomplete) {
         if (messageLength <= bytesToRead) {
-          this.handleCompleteMessage(messageType, chunkData, csid, streamId);
+          await this.handleCompleteMessage(messageType, chunkData, csid, streamId);
         } else {
           this.incompleteMessages.set(csid, {
             buffer: chunkData,
@@ -500,7 +521,7 @@ class RTMPConnection {
         incomplete.bytesReceived += bytesToRead;
 
         if (incomplete.bytesReceived >= incomplete.totalLength) {
-          this.handleCompleteMessage(
+          await this.handleCompleteMessage(
             incomplete.messageType,
             incomplete.buffer,
             csid,
@@ -551,7 +572,7 @@ class RTMPConnection {
 
       case MSG_AMF0_CMD:
       case MSG_AMF3_CMD:
-        this.handleCommand(
+        await this.handleCommand(
           payload,
           csid,
           streamId,
@@ -752,14 +773,17 @@ class RTMPConnection {
     logger.info(`Stream published: ${streamKey}`);
     logger.info(`Waiting for video data from RTMP client...`);
 
-    // Initialize GStreamer pipeline for this stream
-    await streamProcessor.initialize(streamKey);
-
+    // Send publish response immediately, don't block on initialization
     this.sendCommandResponse(csid, "onStatus", 0, null, {
       level: "status",
       code: "NetStream.Publish.Start",
       description: "Stream is now published",
       details: streamKey,
+    });
+
+    // Initialize GStreamer pipeline in the background without blocking
+    streamProcessor.initialize(streamKey).catch(error => {
+      logger.error(`Failed to initialize GStreamer pipeline: ${error}`);
     });
   }
 
@@ -846,12 +870,10 @@ class RTMPConnection {
 
 class RTMPServer {
   private port: number;
-  private wsServer: any;
 
   constructor(port: number = 1935) {
     this.port = port;
     this.startTCPServer();
-    this.startWebSocketServer();
   }
 
   private startTCPServer() {
@@ -875,7 +897,9 @@ class RTMPServer {
               return;
             }
 
-            conn.handleData(receivedData);
+            conn.handleData(receivedData).catch(error => {
+              logger.error(`Error handling data: ${error}`);
+            });
           },
 
           close: (socket: any) => {
@@ -899,73 +923,6 @@ class RTMPServer {
     }
   }
 
-  private startWebSocketServer() {
-    try {
-      this.wsServer = Bun.serve({
-        port: 8080,
-        fetch: async (req) => {
-          const url = new URL(req.url);
-
-          if (url.pathname === "/") {
-            return new Response(Bun.file("./examples/obs/websocket-client.html"), {
-              headers: { "Content-Type": "text/html" },
-            });
-          }
-
-          if (url.pathname === "/ws") {
-            const upgraded = this.wsServer.upgrade(req);
-            if (!upgraded) {
-              return new Response("WebSocket upgrade failed", { status: 400 });
-            }
-            return new Response();
-          }
-
-          return new Response("Not found", { status: 404 });
-        },
-        websocket: {
-          message: (ws, message) => {
-            try {
-              const data = JSON.parse(message.toString());
-
-              if (data.type === 'status') {
-                ws.send(JSON.stringify({
-                  type: 'status',
-                  data: streamProcessor.getPipelineStatus()
-                }));
-              }
-            } catch (error) {
-              wsLogger.error('Failed to parse WebSocket message:', error);
-            }
-          },
-          open: (ws) => {
-            wsLogger.info("WebSocket client connected");
-
-            // Add client to stream processor
-            streamProcessor.addClient(ws);
-
-            // Send initial status
-            ws.send(JSON.stringify({ type: 'status', data: 'connected' }));
-            ws.send(JSON.stringify({
-              type: 'pipeline-status',
-              data: streamProcessor.getPipelineStatus()
-            }));
-          },
-          close: (ws, code, message) => {
-            wsLogger.info("WebSocket client disconnected");
-
-            // Remove client from stream processor
-            streamProcessor.removeClient(ws);
-          },
-        },
-      });
-
-      wsLogger.info(`WebSocket server started on ws://localhost:8080`);
-      wsLogger.info(`Open http://localhost:8080 in your browser`);
-    } catch (error: any) {
-      wsLogger.error(`Fatal error: ${error.message}`);
-      process.exit(1);
-    }
-  }
 }
 
 export { RTMPServer, RTMPConnection, StreamProcessor };
