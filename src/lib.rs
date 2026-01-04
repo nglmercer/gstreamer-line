@@ -20,7 +20,6 @@ use napi_derive::napi;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use transcoding::*;
-use types::*;
 
 // Initialize rust-av on module load
 static RUST_AV_INIT: Mutex<bool> = Mutex::new(false);
