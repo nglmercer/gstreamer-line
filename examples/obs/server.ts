@@ -615,9 +615,10 @@ class RTMPConnection {
       case MSG_AMF0_DATA:
       case MSG_AMF3_DATA:
         logger.log(`Received metadata/data message (AMF0/AMF3)`);
-        // Metadata is usually sent before video/audio data
-        // Don't send StreamBegin here - wait for actual video data
-        // The StreamBegin was already sent during connect
+        // Send acknowledgment for metadata to tell OBS we received it
+        // This might trigger OBS to start sending video data
+        this.sendAck(this.bytesReceived);
+        logger.log(`Sent ACK for metadata (${this.bytesReceived} bytes)`);
         break;
 
       case MSG_AMF0_CMD:
@@ -864,6 +865,14 @@ class RTMPConnection {
       description: "Stream is now published",
       details: streamKey,
     });
+
+    // Send StreamBegin message to tell OBS we're ready to receive video data
+    // This is sent after publish to signal that the stream is ready
+    const streamBeginPayload = Buffer.alloc(6);
+    streamBeginPayload.writeUInt16BE(0, 0);
+    streamBeginPayload.writeUInt32BE(1, 0);
+    this.sendControlMessage(4, MSG_USER_CONTROL, streamBeginPayload);
+    logger.log("Sent StreamBegin for stream ID 1 after publish");
 
     // Initialize GStreamer pipeline in the background without blocking
     streamProcessor.initialize(streamKey).catch(error => {
