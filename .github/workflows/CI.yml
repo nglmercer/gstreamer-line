@@ -62,10 +62,10 @@ jobs:
         include:
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: bun run build --target x86_64-apple-darwin
+            build: bun run build
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: bun run build --target x86_64-pc-windows-msvc
+            build: bun run build
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: bun run build --target x86_64-unknown-linux-gnu --use-napi-cross
@@ -102,6 +102,17 @@ jobs:
           else
             echo "setup=rustup default stable"
           fi
+
+      - name: Install GStreamer (macOS)
+        if: matrix.host == 'macos-latest'
+        run: |
+          brew install gstreamer
+
+      - name: Install GStreamer (Linux)
+        if: matrix.host == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 
       - name: Install dependencies
         run: bun install
@@ -141,6 +152,17 @@ jobs:
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: latest
+
+      - name: Install GStreamer (macOS)
+        if: matrix.host == 'macos-latest'
+        run: |
+          brew install gstreamer
+
+      - name: Install GStreamer (Linux)
+        if: matrix.host == 'ubuntu-24.04-arm'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 
       - name: Install dependencies
         run: bun install
