@@ -2,11 +2,11 @@
  * Frame Extraction and Screenshot Tests
  *
  * Tests for extracting frames and taking screenshots from videos
- * using the setup utilities.
+ * using the setup utilities with various codecs and formats.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import setup from './setup.js';
+import setup, { VideoPattern, VideoCodecKey } from './setup.js';
 import * as fs from 'node:fs';
 
 describe('Frame Extraction and Screenshots', () => {
@@ -233,46 +233,163 @@ describe('Frame Extraction and Screenshots', () => {
   });
 
   describe('Video Generation with Different Patterns', () => {
-    it('should generate video with red pattern', async () => {
-      const videoPath = await setup.generateTestVideo('red.avi', 'red');
+    const patterns: VideoPattern[] = ['red', 'colors', 'ball'];
 
-      expect(fs.existsSync(videoPath)).toBe(true);
-    });
-
-    it('should generate video with colors pattern', async () => {
-      const videoPath = await setup.generateTestVideo('colors.avi', 'colors');
-
-      expect(fs.existsSync(videoPath)).toBe(true);
-    });
-
-    it('should generate video with ball pattern', async () => {
-      const videoPath = await setup.generateTestVideo('ball.avi', 'ball');
+    it.each(patterns)('should generate video with %s pattern', async (pattern) => {
+      const videoPath = await setup.generateTestVideo(`${pattern}.avi`, pattern);
 
       expect(fs.existsSync(videoPath)).toBe(true);
     });
   });
 
   describe('Video Generation with Audio', () => {
-    it('should generate video with sine wave audio', async () => {
+    const audioWaves: ('sine' | 'square' | 'saw' | 'triangle')[] = ['sine', 'square'];
+
+    it.each(audioWaves)('should generate video with %s wave audio', async (wave) => {
       const videoPath = await setup.generateTestVideoWithAudio(
-        'sine_audio.avi',
+        `${wave}_audio.avi`,
         'colors',
-        'sine',
+        wave,
         { numBuffers: 30 }
       );
 
       expect(fs.existsSync(videoPath)).toBe(true);
     });
+  });
+});
 
-    it('should generate video with square wave audio', async () => {
-      const videoPath = await setup.generateTestVideoWithAudio(
-        'square_audio.avi',
-        'colors',
-        'square',
-        { numBuffers: 30 }
-      );
+describe('Codec-Specific Frame Extraction', () => {
+  beforeAll(() => {
+    setup.setupTestDirectories();
+  });
+
+  afterAll(() => {
+    setup.cleanupTestDirectories();
+  });
+
+  describe('Video Generation with Different Codecs', () => {
+    const codecsToTest: VideoCodecKey[] = [
+      'h264',
+      'h265',
+      'vp8',
+      'vp9',
+      'av1',
+      'mpeg2',
+      'theora',
+      'jpeg',
+      'png',
+    ];
+
+    it.each(codecsToTest)('should generate video with %s codec if available', async (codecKey) => {
+      const isAvailable = await setup.isCodecAvailable(codecKey);
+      
+      if (!isAvailable) {
+        console.log(`Skipping ${codecKey} test: codec not available`);
+        return;
+      }
+
+      const { videoPath, codec, format } = await setup.generateVideoWithCodec(codecKey, 0, 'snow', {
+        numBuffers: 30,
+      });
 
       expect(fs.existsSync(videoPath)).toBe(true);
+      expect(videoPath).toContain(codecKey);
+      expect(videoPath).toContain(format.extension);
+    });
+  });
+
+  describe('Frame Extraction from Different Codecs', () => {
+    const codecsToTest: VideoCodecKey[] = ['h264', 'vp8', 'jpeg'];
+
+    it.each(codecsToTest)('should extract frame from %s video if available', async (codecKey) => {
+      const isAvailable = await setup.isCodecAvailable(codecKey);
+      
+      if (!isAvailable) {
+        console.log(`Skipping ${codecKey} extraction test: codec not available`);
+        return;
+      }
+
+      const { videoPath } = await setup.generateVideoWithCodec(codecKey, 0, 'snow', {
+        numBuffers: 30,
+      });
+
+      const frame = await setup.extractFrameFromCodecVideo(videoPath, codecKey, 0, 0);
+
+      expect(frame).not.toBeNull();
+      expect(frame!.data.length).toBeGreaterThan(0);
+      expect(setup.validateFrame(frame!)).toBe(true);
+    });
+  });
+
+  describe('Multiple Format Support', () => {
+    const codecsWithMultipleFormats: { codec: VideoCodecKey; formatIndices: number[] }[] = [
+      { codec: 'h264', formatIndices: [0, 1] }, // MP4, MKV
+      { codec: 'vp8', formatIndices: [0, 1] }, // WebM, MKV
+      { codec: 'jpeg', formatIndices: [0, 1] }, // AVI, MOV
+    ];
+
+    it.each(codecsWithMultipleFormats)('should generate $codec video in multiple formats', async ({ codec, formatIndices }) => {
+      const isAvailable = await setup.isCodecAvailable(codec);
+      
+      if (!isAvailable) {
+        console.log(`Skipping ${codec} multi-format test: codec not available`);
+        return;
+      }
+
+      for (const formatIndex of formatIndices) {
+        const { videoPath, format } = await setup.generateVideoWithCodec(codec, formatIndex, 'colors', {
+          numBuffers: 30,
+        });
+
+        expect(fs.existsSync(videoPath)).toBe(true);
+        expect(videoPath).toContain(format.extension);
+      }
+    });
+  });
+
+  describe('Codec Availability Detection', () => {
+    it('should detect available codecs', async () => {
+      const availableCodecs = await setup.getAvailableCodecs();
+
+      expect(Array.isArray(availableCodecs)).toBe(true);
+      expect(availableCodecs.length).toBeGreaterThan(0);
+      console.log('Available codecs:', availableCodecs.join(', '));
+    });
+
+    it('should correctly identify codec availability', async () => {
+      // jpeg should always be available
+      const jpegAvailable = await setup.isCodecAvailable('jpeg');
+      expect(jpegAvailable).toBe(true);
+
+      // Test a codec that might not be available
+      const av1Available = await setup.isCodecAvailable('av1');
+      expect(typeof av1Available).toBe('boolean');
+    });
+  });
+
+  describe('Frame Extraction Performance Across Codecs', () => {
+    const codecsToBenchmark: VideoCodecKey[] = ['jpeg', 'h264', 'vp8'];
+
+    it.each(codecsToBenchmark)('should benchmark frame extraction from %s', async (codecKey) => {
+      const isAvailable = await setup.isCodecAvailable(codecKey);
+      
+      if (!isAvailable) {
+        console.log(`Skipping ${codecKey} benchmark: codec not available`);
+        return;
+      }
+
+      const { videoPath } = await setup.generateVideoWithCodec(codecKey, 0, 'snow', {
+        numBuffers: 30,
+      });
+
+      const results = await setup.benchmarkFrameExtraction(videoPath, 5);
+
+      expect(results.avgTime).toBeGreaterThan(0);
+      expect(results.minTime).toBeGreaterThan(0);
+      expect(results.maxTime).toBeGreaterThan(0);
+      expect(results.maxTime).toBeGreaterThanOrEqual(results.minTime);
+
+      console.log(`${codecKey} extraction - Avg: ${results.avgTime.toFixed(2)}ms, Min: ${results.minTime.toFixed(2)}ms, Max: ${results.maxTime.toFixed(2)}ms`);
     });
   });
 });

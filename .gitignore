@@ -129,3 +129,4 @@ Cargo.lock
 !.yarn/versions
 /npm
 bun.lock
+__test__/temp_output/*

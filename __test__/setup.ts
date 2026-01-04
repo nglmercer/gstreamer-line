@@ -59,6 +59,141 @@ export const VIDEO_PATTERNS = [
 export type VideoPattern = typeof VIDEO_PATTERNS[number];
 
 // ============================================================================
+// Codec and Format Definitions
+// ============================================================================
+
+export interface VideoCodec {
+  name: string;
+  encoder: string;
+  decoder: string;
+  formats: VideoFormat[];
+}
+
+export interface VideoFormat {
+  extension: string;
+  muxer: string;
+  demuxer: string;
+}
+
+export const VIDEO_CODECS: Record<string, VideoCodec> = {
+  h264: {
+    name: 'H.264',
+    encoder: 'x264enc',
+    decoder: 'avdec_h264',
+    formats: [
+      { extension: 'mp4', muxer: 'mp4mux', demuxer: 'qtdemux' },
+      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
+    ],
+  },
+  h265: {
+    name: 'H.265/HEVC',
+    encoder: 'x265enc',
+    decoder: 'avdec_h265',
+    formats: [
+      { extension: 'mp4', muxer: 'mp4mux', demuxer: 'qtdemux' },
+      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
+    ],
+  },
+  vp8: {
+    name: 'VP8',
+    encoder: 'vp8enc',
+    decoder: 'vp8dec',
+    formats: [
+      { extension: 'webm', muxer: 'webmmux', demuxer: 'matroskademux' },
+      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
+    ],
+  },
+  vp9: {
+    name: 'VP9',
+    encoder: 'vp9enc',
+    decoder: 'vp9dec',
+    formats: [
+      { extension: 'webm', muxer: 'webmmux', demuxer: 'matroskademux' },
+      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
+    ],
+  },
+  av1: {
+    name: 'AV1',
+    encoder: 'av1enc',
+    decoder: 'av1dec',
+    formats: [
+      { extension: 'webm', muxer: 'webmmux', demuxer: 'matroskademux' },
+      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
+    ],
+  },
+  mpeg2: {
+    name: 'MPEG-2',
+    encoder: 'mpeg2enc',
+    decoder: 'mpeg2dec',
+    formats: [
+      { extension: 'mpg', muxer: 'mpegpsmux', demuxer: 'mpegpsdemux' },
+    ],
+  },
+  theora: {
+    name: 'Theora',
+    encoder: 'theoraenc',
+    decoder: 'theoradec',
+    formats: [
+      { extension: 'ogv', muxer: 'oggmux', demuxer: 'oggdemux' },
+    ],
+  },
+  jpeg: {
+    name: 'MJPEG',
+    encoder: 'jpegenc',
+    decoder: 'jpegdec',
+    formats: [
+      { extension: 'avi', muxer: 'avimux', demuxer: 'avidemux' },
+      { extension: 'mov', muxer: 'qtmux', demuxer: 'qtdemux' },
+    ],
+  },
+  png: {
+    name: 'PNG',
+    encoder: 'pngenc',
+    decoder: 'pngdec',
+    formats: [
+      { extension: 'avi', muxer: 'avimux', demuxer: 'avidemux' },
+      { extension: 'mov', muxer: 'qtmux', demuxer: 'qtdemux' },
+    ],
+  },
+};
+
+export const AUDIO_CODECS = {
+  mp3: {
+    name: 'MP3',
+    encoder: 'lamemp3enc',
+    decoder: 'mpg123audiodec',
+    format: 'audio/mpeg',
+  },
+  aac: {
+    name: 'AAC',
+    encoder: 'faac',
+    decoder: 'faad',
+    format: 'audio/mpeg',
+  },
+  vorbis: {
+    name: 'Vorbis',
+    encoder: 'vorbisenc',
+    decoder: 'vorbisdec',
+    format: 'audio/x-vorbis',
+  },
+  opus: {
+    name: 'Opus',
+    encoder: 'opusenc',
+    decoder: 'opusdec',
+    format: 'audio/x-opus',
+  },
+  flac: {
+    name: 'FLAC',
+    encoder: 'flacenc',
+    decoder: 'flacdec',
+    format: 'audio/x-flac',
+  },
+};
+
+export type VideoCodecKey = keyof typeof VIDEO_CODECS;
+export type AudioCodecKey = keyof typeof AUDIO_CODECS;
+
+// ============================================================================
 // Directory Management
 // ============================================================================
 
@@ -203,6 +338,168 @@ export async function generateCustomVideo(
   kit.cleanup();
 
   return outputPath;
+}
+
+// ============================================================================
+// Codec-Specific Video Generation
+// ============================================================================
+
+/**
+ * Generate a test video with a specific codec and format
+ */
+export async function generateVideoWithCodec(
+  codecKey: VideoCodecKey,
+  formatIndex: number = 0,
+  pattern: VideoPattern = 'snow',
+  config: Partial<VideoConfig> = {}
+): Promise<{ videoPath: string; codec: VideoCodec; format: VideoFormat }> {
+  const codec = VIDEO_CODECS[codecKey];
+  const format = codec.formats[formatIndex];
+  const finalConfig = { ...DEFAULT_VIDEO_CONFIG, ...config };
+  const filename = `${codecKey}_${format.extension}`;
+  const outputPath = path.join(TEST_DIR, filename);
+
+  const kit = new GstKit();
+
+  const pipeline = `
+    videotestsrc pattern=${pattern} num-buffers=${finalConfig.numBuffers} !
+    video/x-raw,width=${finalConfig.width},height=${finalConfig.height},framerate=${finalConfig.framerate}/1 !
+    ${codec.encoder} ! ${format.muxer} ! filesink location="${outputPath}"
+  `;
+
+  kit.setPipeline(pipeline);
+  kit.play();
+
+  const waitTime = (finalConfig.numBuffers / finalConfig.framerate) * 1000 + 500;
+  await new Promise(resolve => setTimeout(resolve, waitTime));
+
+  kit.stop();
+  kit.cleanup();
+
+  return { videoPath: outputPath, codec, format };
+}
+
+/**
+ * Generate a test video with both video and audio codecs
+ */
+export async function generateVideoWithAudioCodecs(
+  videoCodecKey: VideoCodecKey,
+  audioCodecKey: AudioCodecKey,
+  pattern: VideoPattern = 'colors',
+  config: Partial<VideoConfig> = {}
+): Promise<{ videoPath: string; videoCodec: VideoCodec; audioCodec: typeof AUDIO_CODECS[AudioCodecKey] }> {
+  const videoCodec = VIDEO_CODECS[videoCodecKey];
+  const audioCodec = AUDIO_CODECS[audioCodecKey];
+  const finalConfig = { ...DEFAULT_VIDEO_CONFIG, ...config };
+  const filename = `${videoCodecKey}_${audioCodecKey}.avi`;
+  const outputPath = path.join(TEST_DIR, filename);
+
+  const kit = new GstKit();
+
+  const pipeline = `
+    videotestsrc pattern=${pattern} num-buffers=${finalConfig.numBuffers} !
+    video/x-raw,width=${finalConfig.width},height=${finalConfig.height},framerate=${finalConfig.framerate}/1 !
+    ${videoCodec.encoder} ! queue ! avimux name=mux ! filesink location="${outputPath}"
+    audiotestsrc wave=sine num-buffers=${finalConfig.numBuffers} !
+    audio/x-raw,rate=44100,channels=2 !
+    ${audioCodec.encoder} ! queue ! mux.
+  `;
+
+  kit.setPipeline(pipeline);
+  kit.play();
+
+  const waitTime = (finalConfig.numBuffers / finalConfig.framerate) * 1000 + 500;
+  await new Promise(resolve => setTimeout(resolve, waitTime));
+
+  kit.stop();
+  kit.cleanup();
+
+  return { videoPath: outputPath, videoCodec, audioCodec };
+}
+
+/**
+ * Test if a codec is available
+ */
+export async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean> {
+  const codec = VIDEO_CODECS[codecKey];
+  const kit = new GstKit();
+
+  try {
+    const pipeline = `videotestsrc num-buffers=1 ! ${codec.encoder} ! fakesink`;
+    kit.setPipeline(pipeline);
+    kit.play();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    kit.stop();
+    kit.cleanup();
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('no element')) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Get list of available codecs
+ */
+export async function getAvailableCodecs(): Promise<VideoCodecKey[]> {
+  const available: VideoCodecKey[] = [];
+  
+  for (const codecKey of Object.keys(VIDEO_CODECS) as VideoCodecKey[]) {
+    if (await isCodecAvailable(codecKey)) {
+      available.push(codecKey);
+    }
+  }
+  
+  return available;
+}
+
+/**
+ * Extract frame from video with specific codec
+ */
+export async function extractFrameFromCodecVideo(
+  videoPath: string,
+  codecKey: VideoCodecKey,
+  formatIndex: number = 0,
+  timestampMs: number = 0
+): Promise<Frame | null> {
+  const codec = VIDEO_CODECS[codecKey];
+  const format = codec.formats[formatIndex];
+  const kit = new GstKit();
+
+  const pipeline = `
+    filesrc location="${videoPath}" !
+    ${format.demuxer} ! ${codec.decoder} !
+    videoconvert ! video/x-raw,format=RGBA !
+    appsink name=sink
+  `;
+
+  kit.setPipeline(pipeline);
+  kit.play();
+
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  if (timestampMs > 0) {
+    kit.seek(timestampMs * 1_000_000);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  const frameData = kit.pullSample('sink');
+  kit.stop();
+  kit.cleanup();
+
+  if (!frameData) {
+    return null;
+  }
+
+  return {
+    data: frameData,
+    width: 320,
+    height: 240,
+    format: 'RGBA',
+    timestamp: timestampMs,
+  };
 }
 
 // ============================================================================
@@ -668,10 +965,17 @@ export default {
   generateTestVideoWithAudio,
   generateCustomVideo,
 
+  // Codec-specific generation
+  generateVideoWithCodec,
+  generateVideoWithAudioCodecs,
+  isCodecAvailable,
+  getAvailableCodecs,
+
   // Frame extraction
   extractFrame,
   extractFrames,
   extractAllFrames,
+  extractFrameFromCodecVideo,
 
   // Frame shots
   takeFrameShot,
@@ -700,4 +1004,6 @@ export default {
   FRAMES_DIR,
   DEFAULT_VIDEO_CONFIG,
   VIDEO_PATTERNS,
+  VIDEO_CODECS,
+  AUDIO_CODECS,
 };
