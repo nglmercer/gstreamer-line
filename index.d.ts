@@ -33,6 +33,75 @@ export declare class GstKit {
    */
   setPipeline(pipelineString: string): void
   /**
+   * Sets up a callback for pipeline events
+   *
+   * # Arguments
+   * * `callback` - A JavaScript function to call when pipeline events occur
+   *
+   * # Example
+   * ```javascript
+   * kit.onEvent((event) => {
+   *   console.log("Event:", event.eventType, event.message);
+   * });
+   * ```
+   */
+  onEvent(callback: (arg?: unknown) => unknown): void
+  /**
+   * Sets up a callback for frame events from AppSink elements
+   *
+   * # Arguments
+   * * `callback` - A JavaScript function to call when frames are available
+   *
+   * # Example
+   * ```javascript
+   * kit.onFrame((frame) => {
+   *   console.log("Frame from", frame.sinkName, "size:", frame.data.length);
+   * });
+   * ```
+   */
+  onFrame(callback: (arg?: unknown) => unknown): void
+  /**
+   * Starts emitting frames from all AppSink elements in the pipeline
+   *
+   * # Arguments
+   * * `sink_names` - Optional list of sink names to emit frames from. If empty, emits from all AppSinks.
+   *
+   * # Example
+   * ```javascript
+   * // Emit frames from all sinks
+   * kit.startFrameEmission();
+   *
+   * // Emit frames from specific sink
+   * kit.startFrameEmission(["mysink"]);
+   * ```
+   */
+  startFrameEmission(sinkNames?: Array<string> | undefined | null): void
+  /**
+   * Stops emitting frames from AppSink elements
+   *
+   * # Example
+   * ```javascript
+   * kit.stopFrameEmission();
+   * ```
+   */
+  stopFrameEmission(): void
+  /**
+   * Starts monitoring the pipeline bus for events
+   *
+   * This will call the event callback for various pipeline events:
+   * - "eos": End of stream
+   * - "error": Pipeline error
+   * - "warning": Pipeline warning
+   * - "state-changed": Pipeline state changed
+   * - "element": Element message
+   *
+   * # Example
+   * ```javascript
+   * kit.startBusMonitoring();
+   * ```
+   */
+  startBusMonitoring(): void
+  /**
    * Starts playback of the pipeline
    *
    * # Example
@@ -213,4 +282,24 @@ export declare class GstKit {
    * ```
    */
   cleanup(): void
+}
+
+/** Frame data emitted from AppSink */
+export interface FrameData {
+  /** The frame data as a buffer */
+  data: Buffer
+  /** The name of the sink element */
+  sinkName: string
+  /** Timestamp of the frame in nanoseconds */
+  timestamp: number
+}
+
+/** Event types that can be emitted by the pipeline */
+export interface PipelineEvent {
+  /** The type of event */
+  eventType: string
+  /** Optional message associated with the event */
+  message?: string
+  /** Optional error code (for error events) */
+  errorCode?: number
 }

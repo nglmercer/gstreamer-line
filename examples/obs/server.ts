@@ -1,5 +1,5 @@
 import { Logger } from "./logger.js";
-import { GstKit } from "../index.js";
+import { GstKit } from "../../index.js";
 import { EventEmitter } from "events";
 
 // Simple logger instance

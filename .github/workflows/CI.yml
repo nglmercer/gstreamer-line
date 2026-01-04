@@ -32,7 +32,7 @@ jobs:
       - name: Install GStreamer dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev libgobject-2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base-dev gstreamer1.0-plugins-good-dev gstreamer1.0-plugins-bad-dev
+          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 
       - name: Install
         uses: dtolnay/rust-toolchain@stable

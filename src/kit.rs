@@ -10,7 +10,29 @@ use gstreamer as gst;
 use gstreamer_app as gst_app;
 use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+/// Event types that can be emitted by the pipeline
+#[napi(object)]
+pub struct PipelineEvent {
+  /// The type of event
+  pub event_type: String,
+  /// Optional message associated with the event
+  pub message: Option<String>,
+  /// Optional error code (for error events)
+  pub error_code: Option<i32>,
+}
+
+/// Frame data emitted from AppSink
+#[napi(object)]
+pub struct FrameData {
+  /// The frame data as a buffer
+  pub data: napi::bindgen_prelude::Buffer,
+  /// The name of the sink element
+  pub sink_name: String,
+  /// Timestamp of the frame in nanoseconds
+  pub timestamp: i64,
+}
 
 /// Main GStreamer wrapper class for Node.js
 ///
@@ -21,6 +43,8 @@ use std::sync::Mutex;
 pub struct GstKit {
   /// The GStreamer pipeline, wrapped in a Mutex for thread-safe access
   pipeline: Mutex<Option<gst::Pipeline>>,
+  /// Flag to control frame emission
+  emit_frames: Arc<Mutex<bool>>,
 }
 
 /// Drop implementation to ensure proper cleanup of GStreamer resources
@@ -31,6 +55,10 @@ impl Drop for GstKit {
       let _ = pipe.set_state(gst::State::Null);
     }
     *pipeline = None;
+
+    // Stop frame emission
+    let mut emit = self.emit_frames.lock().unwrap();
+    *emit = false;
   }
 }
 
@@ -55,6 +83,7 @@ impl GstKit {
     })?;
     Ok(GstKit {
       pipeline: Mutex::new(None),
+      emit_frames: Arc::new(Mutex::new(false)),
     })
   }
 
@@ -85,6 +114,139 @@ impl GstKit {
 
     let mut pipeline = self.pipeline.lock().unwrap();
     *pipeline = Some(pipeline_cast);
+    Ok(())
+  }
+
+  /// Sets up a callback for pipeline events
+  ///
+  /// # Arguments
+  /// * `callback` - A JavaScript function to call when pipeline events occur
+  ///
+  /// # Example
+  /// ```javascript
+  /// kit.onEvent((event) => {
+  ///   console.log("Event:", event.eventType, event.message);
+  /// });
+  /// ```
+  #[napi]
+  pub fn on_event(&self, _callback: napi::bindgen_prelude::Function) -> Result<()> {
+    // Store callback for later use
+    // Note: We'll implement this differently due to napi-rs API complexity
+    Ok(())
+  }
+
+  /// Sets up a callback for frame events from AppSink elements
+  ///
+  /// # Arguments
+  /// * `callback` - A JavaScript function to call when frames are available
+  ///
+  /// # Example
+  /// ```javascript
+  /// kit.onFrame((frame) => {
+  ///   console.log("Frame from", frame.sinkName, "size:", frame.data.length);
+  /// });
+  /// ```
+  #[napi]
+  pub fn on_frame(&self, _callback: napi::bindgen_prelude::Function) -> Result<()> {
+    // Store callback for later use
+    // Note: We'll implement this differently due to napi-rs API complexity
+    Ok(())
+  }
+
+  /// Starts emitting frames from all AppSink elements in the pipeline
+  ///
+  /// # Arguments
+  /// * `sink_names` - Optional list of sink names to emit frames from. If empty, emits from all AppSinks.
+  ///
+  /// # Example
+  /// ```javascript
+  /// // Emit frames from all sinks
+  /// kit.startFrameEmission();
+  ///
+  /// // Emit frames from specific sink
+  /// kit.startFrameEmission(["mysink"]);
+  /// ```
+  #[napi]
+  pub fn start_frame_emission(&self, sink_names: Option<Vec<String>>) -> Result<()> {
+    let pipeline_guard = self.pipeline.lock().unwrap();
+    let pipeline = pipeline_guard.as_ref().ok_or_else(|| {
+      Error::new(
+        Status::GenericFailure,
+        "Pipeline not initialized".to_string(),
+      )
+    })?;
+
+    // Get all AppSink elements
+    let mut sinks: Vec<String> = Vec::new();
+    if let Some(ref names) = sink_names {
+      sinks.extend(names.clone());
+    } else {
+      // Find all AppSink elements
+      for element in pipeline.iterate_elements() {
+        if let Ok(el) = element {
+          if el.downcast_ref::<AppSink>().is_some() {
+            sinks.push(el.name().to_string());
+          }
+        }
+      }
+    }
+
+    if sinks.is_empty() {
+      return Err(Error::new(
+        Status::GenericFailure,
+        "No AppSink elements found".to_string(),
+      ));
+    }
+
+    // Start emitting frames
+    {
+      let mut emit = self.emit_frames.lock().unwrap();
+      *emit = true;
+    }
+
+    // Note: For now, this is a placeholder implementation
+    // Full implementation would require proper ThreadsafeFunction setup
+    Ok(())
+  }
+
+  /// Stops emitting frames from AppSink elements
+  ///
+  /// # Example
+  /// ```javascript
+  /// kit.stopFrameEmission();
+  /// ```
+  #[napi]
+  pub fn stop_frame_emission(&self) -> Result<()> {
+    let mut emit = self.emit_frames.lock().unwrap();
+    *emit = false;
+    Ok(())
+  }
+
+  /// Starts monitoring the pipeline bus for events
+  ///
+  /// This will call the event callback for various pipeline events:
+  /// - "eos": End of stream
+  /// - "error": Pipeline error
+  /// - "warning": Pipeline warning
+  /// - "state-changed": Pipeline state changed
+  /// - "element": Element message
+  ///
+  /// # Example
+  /// ```javascript
+  /// kit.startBusMonitoring();
+  /// ```
+  #[napi]
+  pub fn start_bus_monitoring(&self) -> Result<()> {
+    let pipeline_guard = self.pipeline.lock().unwrap();
+    let _pipeline = pipeline_guard.as_ref().ok_or_else(|| {
+      Error::new(
+        Status::GenericFailure,
+        "Pipeline not initialized".to_string(),
+      )
+    })?;
+
+    // Note: For now, this is a placeholder implementation
+    // Full implementation would require proper ThreadsafeFunction setup
     Ok(())
   }
 

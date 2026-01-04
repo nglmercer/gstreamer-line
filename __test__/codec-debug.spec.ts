@@ -9,109 +9,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { GstKit } from '../index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import setup, { VideoCodecKey, VideoCodec, VideoFormat, VIDEO_CODECS, isCodecAvailable, getCodecEncoder } from './setup.js';
 
 const TEST_DIR = path.join(__dirname, 'temp_output');
-
-// ============================================================================
-// Codec Definitions
-// ============================================================================
-
-interface VideoCodec {
-  name: string;
-  encoder: string;
-  decoder: string;
-  formats: VideoFormat[];
-}
-
-interface VideoFormat {
-  extension: string;
-  muxer: string;
-  demuxer: string;
-}
-
-const VIDEO_CODECS: Record<string, VideoCodec> = {
-  h264: {
-    name: 'H.264',
-    encoder: 'x264enc',
-    decoder: 'avdec_h264',
-    formats: [
-      { extension: 'mp4', muxer: 'mp4mux', demuxer: 'qtdemux' },
-      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
-    ],
-  },
-  h265: {
-    name: 'H.265/HEVC',
-    encoder: 'x265enc',
-    decoder: 'avdec_h265',
-    formats: [
-      { extension: 'mp4', muxer: 'mp4mux', demuxer: 'qtdemux' },
-      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
-    ],
-  },
-  vp8: {
-    name: 'VP8',
-    encoder: 'vp8enc',
-    decoder: 'vp8dec',
-    formats: [
-      { extension: 'webm', muxer: 'webmmux', demuxer: 'matroskademux' },
-      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
-    ],
-  },
-  vp9: {
-    name: 'VP9',
-    encoder: 'vp9enc',
-    decoder: 'vp9dec',
-    formats: [
-      { extension: 'webm', muxer: 'webmmux', demuxer: 'matroskademux' },
-      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
-    ],
-  },
-  av1: {
-    name: 'AV1',
-    encoder: 'av1enc',
-    decoder: 'av1dec',
-    formats: [
-      { extension: 'webm', muxer: 'webmmux', demuxer: 'matroskademux' },
-      { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
-    ],
-  },
-  mpeg2: {
-    name: 'MPEG-2',
-    encoder: 'mpeg2enc',
-    decoder: 'mpeg2dec',
-    formats: [
-      { extension: 'mpg', muxer: 'mpegpsmux', demuxer: 'mpegpsdemux' },
-    ],
-  },
-  theora: {
-    name: 'Theora',
-    encoder: 'theoraenc',
-    decoder: 'theoradec',
-    formats: [
-      { extension: 'ogv', muxer: 'oggmux', demuxer: 'oggdemux' },
-    ],
-  },
-  jpeg: {
-    name: 'MJPEG',
-    encoder: 'jpegenc',
-    decoder: 'jpegdec',
-    formats: [
-      { extension: 'avi', muxer: 'avimux', demuxer: 'avidemux' },
-      { extension: 'mov', muxer: 'qtmux', demuxer: 'qtdemux' },
-    ],
-  },
-  png: {
-    name: 'PNG',
-    encoder: 'pngenc',
-    decoder: 'pngdec',
-    formats: [
-      { extension: 'avi', muxer: 'avimux', demuxer: 'avidemux' },
-      { extension: 'mov', muxer: 'qtmux', demuxer: 'qtdemux' },
-    ],
-  },
-};
-
-type VideoCodecKey = keyof typeof VIDEO_CODECS;
 
 // ============================================================================
 // Setup and Teardown
@@ -148,39 +48,6 @@ afterAll(() => {
 // Helper Functions
 // ============================================================================
 
-async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean> {
-  const codec = VIDEO_CODECS[codecKey];
-  const kit = new GstKit();
-
-  console.log(`  [DEBUG] Testing codec availability for ${codecKey} (${codec.encoder})`);
-
-  try {
-    const pipeline = `videotestsrc num-buffers=1 ! ${codec.encoder} ! fakesink`;
-    console.log(`  [DEBUG] Pipeline: ${pipeline}`);
-
-    kit.setPipeline(pipeline);
-    console.log(`  [DEBUG] Pipeline set successfully`);
-
-    kit.play();
-    console.log(`  [DEBUG] Pipeline playing`);
-
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    kit.stop();
-    kit.cleanup();
-
-    console.log(`  [DEBUG] ✓ Codec ${codecKey} is available`);
-    return true;
-  } catch (error) {
-    if (error instanceof Error) {
-      console.log(`  [DEBUG] ✗ Codec ${codecKey} is NOT available: ${error.message}`);
-    } else {
-      console.log(`  [DEBUG] ✗ Codec ${codecKey} is NOT available: ${String(error)}`);
-    }
-    return false;
-  }
-}
-
 async function generateVideoWithCodec(
   codecKey: VideoCodecKey,
   formatIndex: number = 0,
@@ -191,9 +58,12 @@ async function generateVideoWithCodec(
   const filename = `${codecKey}_${format.extension}`;
   const outputPath = path.join(TEST_DIR, filename);
 
+  // Get the actual encoder to use (primary or alternative)
+  const encoder = await getCodecEncoder(codecKey);
+
   console.log(`\n[DEBUG] Generating video with ${codecKey} codec`);
   console.log(`  Codec: ${codec.name}`);
-  console.log(`  Encoder: ${codec.encoder}`);
+  console.log(`  Encoder: ${encoder}`);
   console.log(`  Format: ${format.extension}`);
   console.log(`  Muxer: ${format.muxer}`);
   console.log(`  Pattern: ${pattern}`);
@@ -204,7 +74,7 @@ async function generateVideoWithCodec(
   const pipeline = `
     videotestsrc pattern=${pattern} num-buffers=30 !
     video/x-raw,width=320,height=240,framerate=30/1 !
-    ${codec.encoder} ! ${format.muxer} ! filesink location="${outputPath}"
+    ${encoder} ! ${format.muxer} ! filesink location="${outputPath}"
   `;
 
   console.log(`  Pipeline: ${pipeline.trim()}`);
