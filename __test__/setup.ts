@@ -67,6 +67,7 @@ export interface VideoCodec {
   encoder: string;
   decoder: string;
   formats: VideoFormat[];
+  alternativeEncoders?: string[];
 }
 
 export interface VideoFormat {
@@ -84,6 +85,7 @@ export const VIDEO_CODECS: Record<string, VideoCodec> = {
       { extension: 'mp4', muxer: 'mp4mux', demuxer: 'qtdemux' },
       { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
     ],
+    alternativeEncoders: ['avenc_h264', 'omxh264enc'],
   },
   h265: {
     name: 'H.265/HEVC',
@@ -93,6 +95,7 @@ export const VIDEO_CODECS: Record<string, VideoCodec> = {
       { extension: 'mp4', muxer: 'mp4mux', demuxer: 'qtdemux' },
       { extension: 'mkv', muxer: 'matroskamux', demuxer: 'matroskademux' },
     ],
+    alternativeEncoders: ['avenc_h265', 'omxh265enc'],
   },
   vp8: {
     name: 'VP8',
@@ -128,6 +131,7 @@ export const VIDEO_CODECS: Record<string, VideoCodec> = {
     formats: [
       { extension: 'mpg', muxer: 'mpegpsmux', demuxer: 'mpegpsdemux' },
     ],
+    alternativeEncoders: ['avenc_mpeg2video'],
   },
   theora: {
     name: 'Theora',
@@ -352,19 +356,22 @@ export async function generateVideoWithCodec(
   formatIndex: number = 0,
   pattern: VideoPattern = 'snow',
   config: Partial<VideoConfig> = {}
-): Promise<{ videoPath: string; codec: VideoCodec; format: VideoFormat }> {
+): Promise<{ videoPath: string; codec: VideoCodec; format: VideoFormat; encoder: string }> {
   const codec = VIDEO_CODECS[codecKey];
   const format = codec.formats[formatIndex];
   const finalConfig = { ...DEFAULT_VIDEO_CONFIG, ...config };
   const filename = `${codecKey}_${format.extension}`;
   const outputPath = path.join(TEST_DIR, filename);
 
+  // Get the actual encoder to use (primary or alternative)
+  const encoder = await getCodecEncoder(codecKey);
+
   const kit = new GstKit();
 
   const pipeline = `
     videotestsrc pattern=${pattern} num-buffers=${finalConfig.numBuffers} !
     video/x-raw,width=${finalConfig.width},height=${finalConfig.height},framerate=${finalConfig.framerate}/1 !
-    ${codec.encoder} ! ${format.muxer} ! filesink location="${outputPath}"
+    ${encoder} ! ${format.muxer} ! filesink location="${outputPath}"
   `;
 
   kit.setPipeline(pipeline);
@@ -376,7 +383,7 @@ export async function generateVideoWithCodec(
   kit.stop();
   kit.cleanup();
 
-  return { videoPath: outputPath, codec, format };
+  return { videoPath: outputPath, codec, format, encoder };
 }
 
 /**
@@ -418,12 +425,13 @@ export async function generateVideoWithAudioCodecs(
 }
 
 /**
- * Test if a codec is available
+ * Test if a codec is available (including alternative encoders)
  */
 export async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean> {
   const codec = VIDEO_CODECS[codecKey];
   const kit = new GstKit();
 
+  // Try primary encoder first
   try {
     const pipeline = `videotestsrc num-buffers=1 ! ${codec.encoder} ! fakesink`;
     kit.setPipeline(pipeline);
@@ -434,7 +442,72 @@ export async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean
     return true;
   } catch (error) {
     if (error instanceof Error && error.message.includes('no element')) {
+      // Try alternative encoders if available
+      if (codec.alternativeEncoders && codec.alternativeEncoders.length > 0) {
+        for (const altEncoder of codec.alternativeEncoders) {
+          try {
+            const altPipeline = `videotestsrc num-buffers=1 ! ${altEncoder} ! fakesink`;
+            kit.setPipeline(altPipeline);
+            kit.play();
+            await new Promise(resolve => setTimeout(resolve, 100));
+            kit.stop();
+            kit.cleanup();
+            console.log(`  [INFO] Using alternative encoder ${altEncoder} for ${codecKey}`);
+            return true;
+          } catch (altError) {
+            if (altError instanceof Error && altError.message.includes('no element')) {
+              continue; // Try next alternative
+            }
+            kit.cleanup();
+            throw altError;
+          }
+        }
+      }
       return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Get the actual encoder to use for a codec (primary or alternative)
+ */
+export async function getCodecEncoder(codecKey: VideoCodecKey): Promise<string> {
+  const codec = VIDEO_CODECS[codecKey];
+  const kit = new GstKit();
+
+  // Try primary encoder first
+  try {
+    const pipeline = `videotestsrc num-buffers=1 ! ${codec.encoder} ! fakesink`;
+    kit.setPipeline(pipeline);
+    kit.play();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    kit.stop();
+    kit.cleanup();
+    return codec.encoder;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('no element')) {
+      // Try alternative encoders if available
+      if (codec.alternativeEncoders && codec.alternativeEncoders.length > 0) {
+        for (const altEncoder of codec.alternativeEncoders) {
+          try {
+            const altPipeline = `videotestsrc num-buffers=1 ! ${altEncoder} ! fakesink`;
+            kit.setPipeline(altPipeline);
+            kit.play();
+            await new Promise(resolve => setTimeout(resolve, 100));
+            kit.stop();
+            kit.cleanup();
+            return altEncoder;
+          } catch (altError) {
+            if (altError instanceof Error && altError.message.includes('no element')) {
+              continue; // Try next alternative
+            }
+            kit.cleanup();
+            throw altError;
+          }
+        }
+      }
+      throw new Error(`No encoder available for codec ${codecKey}`);
     }
     throw error;
   }
@@ -500,6 +573,37 @@ export async function extractFrameFromCodecVideo(
     format: 'RGBA',
     timestamp: timestampMs,
   };
+}
+
+/**
+ * Get detailed codec availability report
+ */
+export async function getCodecAvailabilityReport(): Promise<
+  Record<string, { available: boolean; encoder: string | null; alternatives: string[] }>
+> {
+  const report: Record<string, { available: boolean; encoder: string | null; alternatives: string[] }> = {};
+
+  for (const codecKey of Object.keys(VIDEO_CODECS) as VideoCodecKey[]) {
+    const codec = VIDEO_CODECS[codecKey];
+    const alternatives = codec.alternativeEncoders || [];
+
+    try {
+      const encoder = await getCodecEncoder(codecKey);
+      report[codecKey] = {
+        available: true,
+        encoder,
+        alternatives,
+      };
+    } catch (error) {
+      report[codecKey] = {
+        available: false,
+        encoder: null,
+        alternatives,
+      };
+    }
+  }
+
+  return report;
 }
 
 // ============================================================================
@@ -970,6 +1074,8 @@ export default {
   generateVideoWithAudioCodecs,
   isCodecAvailable,
   getAvailableCodecs,
+  getCodecEncoder,
+  getCodecAvailabilityReport,
 
   // Frame extraction
   extractFrame,
