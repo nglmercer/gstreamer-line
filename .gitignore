@@ -130,3 +130,6 @@ Cargo.lock
 /npm
 bun.lock
 __test__/temp_output/*
+
+# GStreamer library symlinks for Bazzite (system libraries)
+gst-lib/

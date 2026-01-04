@@ -3,7 +3,7 @@ import { GstKit } from "../../index.js";
 import { isCodecDecoderAvailable, getCodecDecoder } from "../../__test__/setup.js";
 
 // Simple logger instance - Enable debug mode to see detailed logs
-const logger = new Logger(false, "[RTMP]");
+const logger = new Logger(true, "[RTMP]");
 
 // RTMP Constants
 const RTMP_HANDSHAKE_SIZE = 1536;
@@ -134,11 +134,18 @@ class StreamProcessor {
   // Start streaming when data is available
   startStreaming(): void {
     if (this.streamingStarted || !this.pipelineInitialized || !this.gstKit) {
+      console.log('Cannot start streaming:', {
+        streamingStarted: this.streamingStarted,
+        pipelineInitialized: this.pipelineInitialized,
+        hasGstKit: !!this.gstKit,
+        sequenceHeaderReceived: this.sequenceHeaderReceived
+      });
       return;
     }
 
     // Wait for sequence header before starting frame extraction
     if (!this.sequenceHeaderReceived) {
+      console.log('Waiting for sequence header...');
       return;
     }
 
@@ -160,12 +167,19 @@ class StreamProcessor {
         if (frame) {
           this.frameCount++;
           
+          console.log(`✅ Pulled frame ${this.frameCount}, size: ${frame.length} bytes`);
+          
           // Save frame as temporary image file
           this.saveFrameAsImage(frame);
 
           // Log progress every 30 frames
           if (this.frameCount % 30 === 0) {
             console.log(`📹 Processed ${this.frameCount} frames`);
+          }
+        } else {
+          // Log occasionally that we're waiting for frames
+          if (this.frameCount % 100 === 0) {
+            console.log('⏳ Waiting for frames from pipeline...');
           }
         }
       } catch (error) {
@@ -198,6 +212,7 @@ class StreamProcessor {
 
   processVideoBuffer(buffer: Buffer): void {
     if (!this.pipelineInitialized || !this.gstKit) {
+      console.log('⚠️ Pipeline not initialized, cannot process video buffer');
       return;
     }
 
@@ -214,13 +229,16 @@ class StreamProcessor {
         // Skip RTMP header (4 bytes) and extract H.264 data
         const h264Data = buffer.subarray(4);
         
+        console.log(`📥 Processing video buffer: ${buffer.length} bytes, AVC type: ${avcPacketType}, H.264 data: ${h264Data.length} bytes`);
+        
         // Check if this is a sequence header (SPS/PPS)
         if (avcPacketType === 0 && !this.sequenceHeaderReceived) {
           this.sequenceHeaderReceived = true;
-          console.log('Sequence header received');
+          console.log('✅ Sequence header received');
         }
         
         this.gstKit.pushSample("src", h264Data);
+        console.log(`✅ Pushed ${h264Data.length} bytes to GStreamer pipeline`);
         
         // Start streaming after sequence header is received
         if (this.sequenceHeaderReceived && !this.streamingStarted) {
@@ -228,7 +246,7 @@ class StreamProcessor {
         }
       }
     } catch (error) {
-      console.error('Error processing video buffer:', error);
+      console.error('❌ Error processing video buffer:', error);
     }
   }
 
@@ -416,10 +434,15 @@ class RTMPConnection {
   }
 
   private async processRTMPMessagesLoop() {
+    let loopCount = 0;
     while (this.buffer.length > 0) {
       const startLen = this.buffer.length;
+      loopCount++;
 
-      if (this.buffer.length < 1) break;
+      if (this.buffer.length < 1) {
+        logger.log(`Loop ${loopCount}: Buffer too short (${this.buffer.length} bytes)`);
+        break;
+      }
 
       const basicHeader = this.buffer[0];
       if (!basicHeader) break;
@@ -451,7 +474,10 @@ class RTMPConnection {
 
       if (fmt === 0) {
         headerSize += 11;
-        if (this.buffer.length < headerSize) break;
+        if (this.buffer.length < headerSize) {
+          logger.log(`Loop ${loopCount}: Need ${headerSize} bytes for type 0 header, have ${this.buffer.length}`);
+          break;
+        }
 
         timestamp = this.buffer.readUIntBE(offset, 3);
         messageLength = this.buffer.readUIntBE(offset + 3, 3);
@@ -467,7 +493,10 @@ class RTMPConnection {
         this.lastMessageStreamId.set(csid, streamId);
       } else if (fmt === 1) {
         headerSize += 7;
-        if (this.buffer.length < headerSize) break;
+        if (this.buffer.length < headerSize) {
+          logger.log(`Loop ${loopCount}: Need ${headerSize} bytes for type 1 header, have ${this.buffer.length}`);
+          break;
+        }
 
         const timestampDelta = this.buffer.readUIntBE(offset, 3);
         timestamp += timestampDelta;
@@ -482,7 +511,10 @@ class RTMPConnection {
         this.lastMessageType.set(csid, messageType);
       } else if (fmt === 2) {
         headerSize += 3;
-        if (this.buffer.length < headerSize) break;
+        if (this.buffer.length < headerSize) {
+          logger.log(`Loop ${loopCount}: Need ${headerSize} bytes for type 2 header, have ${this.buffer.length}`);
+          break;
+        }
 
         const timestampDelta = this.buffer.readUIntBE(offset, 3);
         timestamp += timestampDelta;
@@ -496,7 +528,10 @@ class RTMPConnection {
 
       const bytesToRead = Math.min(remainingBytes, this.peerChunkSize);
 
-      if (this.buffer.length < headerSize + bytesToRead) break;
+      if (this.buffer.length < headerSize + bytesToRead) {
+        logger.log(`Loop ${loopCount}: Need ${headerSize + bytesToRead} bytes for data, have ${this.buffer.length}`);
+        break;
+      }
 
       const chunkData = Buffer.from(
         this.buffer.subarray(headerSize, headerSize + bytesToRead),
@@ -515,6 +550,7 @@ class RTMPConnection {
             timestamp,
             streamId,
           });
+          logger.log(`Loop ${loopCount}: Started assembling message type ${messageType}, received ${bytesToRead}/${messageLength} bytes`);
         }
       } else {
         incomplete.buffer = Buffer.concat([incomplete.buffer, chunkData]);
@@ -528,6 +564,8 @@ class RTMPConnection {
             incomplete.streamId,
           );
           this.incompleteMessages.delete(csid);
+        } else {
+          logger.log(`Loop ${loopCount}: Continuing assembly of message type ${incomplete.messageType}, received ${incomplete.bytesReceived}/${incomplete.totalLength} bytes`);
         }
       }
 
@@ -536,7 +574,10 @@ class RTMPConnection {
         this.lastAckSent = this.bytesReceived;
       }
 
-      if (this.buffer.length === startLen) break;
+      if (this.buffer.length === startLen) {
+        logger.log(`Loop ${loopCount}: No progress made, buffer length unchanged at ${this.buffer.length}`);
+        break;
+      }
     }
   }
 
@@ -546,12 +587,13 @@ class RTMPConnection {
     csid: number,
     streamId: number,
   ) {
-    logger.log(`Received message type ${messageType} with ${payload.length} bytes`);
+    logger.log(`Received message type ${messageType} (${this.getMessageTypeName(messageType)}) with ${payload.length} bytes`);
 
     switch (messageType) {
       case MSG_SET_CHUNK_SIZE:
         if (payload.length >= 4) {
           this.peerChunkSize = payload.readUInt32BE(0) & 0x7fffffff;
+          logger.log(`Chunk size set to: ${this.peerChunkSize}`);
         }
         break;
 
@@ -570,6 +612,14 @@ class RTMPConnection {
         }
         break;
 
+      case MSG_AMF0_DATA:
+      case MSG_AMF3_DATA:
+        logger.log(`Received metadata/data message (AMF0/AMF3)`);
+        // Metadata is usually sent before video/audio data
+        // Don't send StreamBegin here - wait for actual video data
+        // The StreamBegin was already sent during connect
+        break;
+
       case MSG_AMF0_CMD:
       case MSG_AMF3_CMD:
         await this.handleCommand(
@@ -581,24 +631,53 @@ class RTMPConnection {
         break;
 
       case MSG_AUDIO:
-        console.log(`[RTMP AUDIO] Received ${payload.length} bytes from OBS`);
+        logger.log(`[RTMP AUDIO] Received ${payload.length} bytes from OBS`);
         streamProcessor.processAudioBuffer(payload);
         break;
 
       case MSG_VIDEO:
-        console.log(`[RTMP VIDEO] Received ${payload.length} bytes from OBS`);
+        logger.log(`[RTMP VIDEO] Received ${payload.length} bytes from OBS`);
         streamProcessor.processVideoBuffer(payload);
         break;
 
       default:
-        logger.log(`Unhandled message type: ${messageType}`);
+        logger.log(`Unhandled message type: ${messageType} (${this.getMessageTypeName(messageType)})`);
     }
+  }
+
+  private getMessageTypeName(messageType: number): string {
+    const names: Record<number, string> = {
+      1: 'SET_CHUNK_SIZE',
+      2: 'ABORT',
+      3: 'ACK',
+      4: 'USER_CONTROL',
+      5: 'WINDOW_ACK_SIZE',
+      6: 'SET_PEER_BW',
+      8: 'AUDIO',
+      9: 'VIDEO',
+      15: 'AMF3_DATA',
+      16: 'AMF3_SHARED',
+      17: 'AMF3_CMD',
+      18: 'AMF0_DATA',
+      19: 'AMF0_SHARED',
+      20: 'AMF0_CMD',
+      22: 'AGGREGATE',
+    };
+    return names[messageType] || `UNKNOWN(${messageType})`;
   }
 
   private sendAck(bytes: number) {
     const payload = Buffer.alloc(4);
     payload.writeUInt32BE(bytes, 0);
     this.sendControlMessage(2, MSG_ACK, payload);
+  }
+
+  private sendStreamBegin() {
+    const payload = Buffer.alloc(6);
+    payload.writeUInt16BE(0, 0);
+    payload.writeUInt32BE(0, 2);
+    this.sendControlMessage(4, MSG_USER_CONTROL, payload);
+    logger.log("Sent StreamBegin user control message");
   }
 
   private async handleCommand(
@@ -631,7 +710,14 @@ class RTMPConnection {
           break;
 
         case "createStream":
-          this.sendCommandResponse(csid, "_result", transactionId, null, 1);
+          const streamId = 1;
+          this.sendCommandResponse(csid, "_result", transactionId, null, streamId);
+          // Send StreamBegin with actual stream ID
+          const streamBegin = Buffer.alloc(6);
+          streamBegin.writeUInt16BE(0, 0);
+          streamBegin.writeUInt32BE(streamId, 2);
+          this.sendControlMessage(4, MSG_USER_CONTROL, streamBegin);
+          logger.log(`Sent StreamBegin for stream ID ${streamId}`);
           break;
 
         case "publish":
@@ -741,10 +827,8 @@ class RTMPConnection {
     transactionId: number,
     args: any[],
   ) {
-    const streamBegin = Buffer.alloc(6);
-    streamBegin.writeUInt16BE(0, 0);
-    streamBegin.writeUInt32BE(0, 2);
-    this.sendControlMessage(2, MSG_USER_CONTROL, streamBegin);
+    // Don't send StreamBegin here - it should be sent after createStream
+    // with the actual stream ID
 
     this.sendCommandResponse(
       csid,
@@ -897,9 +981,11 @@ class RTMPServer {
               return;
             }
 
+            logger.log(`Socket data event: ${receivedData.length} bytes received`);
             conn.handleData(receivedData).catch(error => {
               logger.error(`Error handling data: ${error}`);
             });
+            logger.log(`After handleData: buffer size = ${conn['buffer']?.length || 0}`);
           },
 
           close: (socket: any) => {
