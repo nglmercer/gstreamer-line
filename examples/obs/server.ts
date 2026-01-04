@@ -187,22 +187,18 @@ class StreamProcessor {
       // Byte 0: Frame type (keyframe=0x17, interframe=0x27)
       // Byte 1: AVC packet type (0=sequence header, 1=NALU, 2=end of sequence)
       // Bytes 2-3: Composition time (24-bit)
-      // Bytes 4+: H.264 data
+      // Bytes 4+: H.264 data in AVCC format (with length prefixes)
       
       if (buffer.length > 4) {
         const frameType = buffer[0];
         const avcPacketType = buffer[1];
         
         // Skip RTMP header (4 bytes) and extract H.264 data
+        // The H.264 data is in AVCC format with length prefixes, no start codes needed
         const h264Data = buffer.subarray(4);
         
-        // Add NAL unit start code (0x00 0x00 0x00 0x01) before each NAL unit
-        // For RTMP, we need to prepend start codes to the H.264 data
-        const startCode = Buffer.from([0x00, 0x00, 0x00, 0x01]);
-        const h264WithStartCode = Buffer.concat([startCode, h264Data]);
-        
-        console.log(`[PIPELINE] Pushing ${h264WithStartCode.length} bytes (frameType=0x${frameType.toString(16)}, avcType=${avcPacketType})`);
-        this.gstKit.pushSample("src", h264WithStartCode);
+        console.log(`[PIPELINE] Pushing ${h264Data.length} bytes (frameType=0x${frameType.toString(16)}, avcType=${avcPacketType})`);
+        this.gstKit.pushSample("src", h264Data);
       }
     } catch (error) {
       console.error(`[PIPELINE ERROR] Failed to process video buffer:`, error);

@@ -182,11 +182,9 @@ impl GstKit {
       sinks.extend(names.clone());
     } else {
       // Find all AppSink elements
-      for element in pipeline.iterate_elements() {
-        if let Ok(el) = element {
-          if el.downcast_ref::<AppSink>().is_some() {
-            sinks.push(el.name().to_string());
-          }
+      for el in pipeline.iterate_elements().into_iter().flatten() {
+        if el.downcast_ref::<AppSink>().is_some() {
+          sinks.push(el.name().to_string());
         }
       }
     }
