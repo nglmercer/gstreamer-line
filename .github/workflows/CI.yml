@@ -17,6 +17,7 @@ on:
       - .editorconfig
       - docs/**
   pull_request: null
+
 jobs:
   lint:
     name: Lint
@@ -32,14 +33,14 @@ jobs:
       - name: Install GStreamer dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-      - name: Install
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Install
+      - name: Install JS Deps
         run: bun install
 
       - name: Oxlint
@@ -77,42 +78,28 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.napi-rs
-            .cargo-cache
-            target/
-          key: ${{ matrix.target }}-cargo-${{ matrix.host }}
-
-      - name: Setup toolchain
-        run: |
-          if [ "${{ matrix.host }}" = "macos-latest" ]; then
-            echo "setup=brew install"
-          else
-            echo "setup=rustup default stable"
-          fi
-
       - name: Install GStreamer (macOS)
         if: matrix.host == 'macos-latest'
+        run: brew install gstreamer gst-plugins-base
+
+      - name: Install GStreamer (Windows)
+        if: matrix.host == 'windows-latest'
         run: |
-          brew install gstreamer
+          choco install gstreamer -y
+          echo "GSTREAMER_1_0_ROOT_X86_64=C:\gstreamer\1.0\msvc_x86_64\" >> $GITHUB_ENV
+          echo "PATH=C:\gstreamer\1.0\msvc_x86_64\bin;${{ env.PATH }}" >> $GITHUB_ENV
 
       - name: Install GStreamer (Linux)
         if: matrix.host == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Install dependencies
         run: bun install
@@ -125,15 +112,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.target }}
-          path: |
-            ${{ env.APP_NAME }}.*.node
-            ${{ env.APP_NAME }}.*.wasm
+          path: "*.node"
           if-no-files-found: error
 
   test-native:
     name: Test on ${{ matrix.host }}
-    needs:
-      - build
+    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -142,8 +126,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - host: macos-latest
             target: x86_64-apple-darwin
-          - host: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4
@@ -155,14 +139,17 @@ jobs:
 
       - name: Install GStreamer (macOS)
         if: matrix.host == 'macos-latest'
-        run: |
-          brew install gstreamer
+        run: brew install gstreamer gst-plugins-base
+
+      - name: Install GStreamer (Windows)
+        if: matrix.host == 'windows-latest'
+        run: choco install gstreamer -y
 
       - name: Install GStreamer (Linux)
-        if: matrix.host == 'ubuntu-24.04-arm'
+        if: matrix.host == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
       - name: Install dependencies
         run: bun install
@@ -172,10 +159,6 @@ jobs:
         with:
           name: bindings-${{ matrix.target }}
           path: .
-
-      - name: List packages
-        run: ls -R .
-        shell: bash
 
       - name: Test bindings
         run: bun test
@@ -191,44 +174,15 @@ jobs:
       - test-native
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: latest
-
       - name: Install dependencies
         run: bun install
-
       - name: Create npm dirs
         run: bun run napi create-npm-dirs
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Move artifacts
-        run: bun run artifacts
-
-      - name: List packages
-        run: ls -R ./npm
-        shell: bash
-
-      - name: Publish
-        run: |
-          npm config set provenance true
-          if git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+$";
-          then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
-            npm publish --access public
-          elif git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+";
-          then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
-            npm publish --tag next --access public
-          else
-            echo "Not a release, skipping publish"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

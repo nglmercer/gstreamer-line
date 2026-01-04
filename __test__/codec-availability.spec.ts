@@ -40,11 +40,13 @@ describe('Codec Availability Detection', () => {
       const codecName = VIDEO_CODECS[codecKey as VideoCodecKey].name;
       const status = info.available ? '✓ AVAILABLE' : '✗ UNAVAILABLE';
       const encoder = info.encoder || 'None';
+      const decoder = info.decoder || 'None';
       const alternatives = info.alternatives.length > 0 ? info.alternatives.join(', ') : 'None';
 
       console.log(`\n${codecKey.toUpperCase()} (${codecName})`);
       console.log(`  Status: ${status}`);
       console.log(`  Encoder: ${encoder}`);
+      console.log(`  Decoder: ${decoder}`);
       console.log(`  Alternatives: ${alternatives}`);
 
       if (info.available) {

@@ -430,6 +430,52 @@ export async function generateVideoWithAudioCodecs(
 
 // Cache to prevent redundant GStreamer pipeline initializations
 const encoderCache: Map<VideoCodecKey, string | null> = new Map();
+const decoderCache: Map<VideoCodecKey, string | null> = new Map();
+
+/**
+ * Internal helper to find first working decoder for a codec
+ */
+async function findBestDecoder(codecKey: VideoCodecKey): Promise<string | null> {
+  if (decoderCache.has(codecKey)) return decoderCache.get(codecKey)!;
+  
+  const codec = VIDEO_CODECS[codecKey];
+  const kit = new GstKit();
+  
+  // Common decoder alternatives for H.264
+  const decoderAlternatives: Record<string, string[]> = {
+    h264: ['avdec_h264', 'decodebin'],
+    h265: ['avdec_h265', 'decodebin'],
+  };
+  
+  const candidates = decoderAlternatives[codecKey] || [codec.decoder];
+
+  for (const decoder of candidates) {
+    try {
+      // Probe decoder by creating a pipeline with encoded data
+      // We need to encode first, then decode - this tests if the decoder works
+      const encoder = codec.encoder;
+      kit.setPipeline(`videotestsrc num-buffers=1 ! ${encoder} ! ${decoder} ! fakesink`);
+      kit.play();
+      
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      kit.stop();
+      kit.cleanup();
+      
+      decoderCache.set(codecKey, decoder);
+      return decoder;
+    } catch (error) {
+      kit.cleanup();
+      if (error instanceof Error && error.message.includes('no element')) {
+        continue;
+      }
+      console.error(`Warning: Unexpected error probing ${decoder}:`, error);
+    }
+  }
+
+  decoderCache.set(codecKey, null);
+  return null;
+}
 
 /**
  * Internal helper to find the first working encoder for a codec
@@ -481,11 +527,30 @@ export async function getCodecEncoder(codecKey: VideoCodecKey): Promise<string> 
 }
 
 /**
- * Test if a codec is available
+ * Test if a codec encoder is available
  */
 export async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean> {
   const encoder = await findBestEncoder(codecKey);
   return encoder !== null;
+}
+
+/**
+ * Test if a codec decoder is available
+ */
+export async function isCodecDecoderAvailable(codecKey: VideoCodecKey): Promise<boolean> {
+  const decoder = await findBestDecoder(codecKey);
+  return decoder !== null;
+}
+
+/**
+ * Get the best available decoder for a codec
+ */
+export async function getCodecDecoder(codecKey: VideoCodecKey): Promise<string> {
+  const decoder = await findBestDecoder(codecKey);
+  if (!decoder) {
+    throw new Error(`No decoder available for codec ${codecKey}`);
+  }
+  return decoder;
 }
 
 /**
@@ -545,12 +610,12 @@ export async function extractFrameFromCodecVideo(
 }
 
 /**
- * Get detailed codec availability report
+ * Get detailed codec availability report (includes both encoder and decoder)
  */
 export async function getCodecAvailabilityReport(): Promise<
-  Record<string, { available: boolean; encoder: string | null; alternatives: string[] }>
+  Record<string, { available: boolean; encoder: string | null; decoder: string | null; alternatives: string[] }>
 > {
-  const report: Record<string, { available: boolean; encoder: string | null; alternatives: string[] }> = {};
+  const report: Record<string, { available: boolean; encoder: string | null; decoder: string | null; alternatives: string[] }> = {};
 
   for (const codecKey of Object.keys(VIDEO_CODECS) as VideoCodecKey[]) {
     const codec = VIDEO_CODECS[codecKey];
@@ -558,15 +623,20 @@ export async function getCodecAvailabilityReport(): Promise<
 
     try {
       const encoder = await getCodecEncoder(codecKey);
+      const decoder = await getCodecDecoder(codecKey).catch(() => null);
+      
       report[codecKey] = {
         available: true,
         encoder,
+        decoder,
         alternatives,
       };
     } catch (error) {
+      const decoder = await getCodecDecoder(codecKey).catch(() => null);
       report[codecKey] = {
         available: false,
         encoder: null,
+        decoder,
         alternatives,
       };
     }
@@ -1042,8 +1112,10 @@ export default {
   generateVideoWithCodec,
   generateVideoWithAudioCodecs,
   isCodecAvailable,
+  isCodecDecoderAvailable,
   getAvailableCodecs,
   getCodecEncoder,
+  getCodecDecoder,
   getCodecAvailabilityReport,
 
   // Frame extraction
