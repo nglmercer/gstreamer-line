@@ -1,8 +1,10 @@
 import { Logger } from "./logger.js";
 import { GstKit } from "../index.js";
+import { EventEmitter } from "events";
 
 // Simple logger instance
-const logger = new Logger(false, "[RTMP]");
+const logger = new Logger(true, "[RTMP]");
+const wsLogger = new Logger(true, "[WS]");
 
 // RTMP Constants
 const RTMP_HANDSHAKE_SIZE = 1536;
@@ -33,24 +35,40 @@ enum HandshakeState {
 }
 
 // GStreamer pipeline for processing RTMP streams in memory
-class StreamProcessor {
+class StreamProcessor extends EventEmitter {
   private gstKit: GstKit;
   private pipelineInitialized: boolean = false;
+  private streamingInterval: NodeJS.Timeout | null = null;
 
   constructor() {
+    super();
     this.gstKit = new GstKit();
+  }
+
+  // Subscribe to frame events
+  onFrame(callback: (frame: Buffer) => void): () => void {
+    this.on('frame', callback);
+    wsLogger.info(`Frame subscriber added. Total subscribers: ${this.listenerCount('frame')}`);
+    
+    // Return unsubscribe function
+    return () => {
+      this.off('frame', callback);
+      wsLogger.info(`Frame subscriber removed. Total subscribers: ${this.listenerCount('frame')}`);
+    };
   }
 
   initialize(streamKey: string): void {
     if (this.pipelineInitialized) return;
 
-    // Simple pipeline that receives RTMP data and processes it in memory
-    // Using appsrc to receive buffers and appsink to pull them back
+    // Pipeline optimizado para RTMP con h264parse configurado para manejar streamings
     const pipelineString = `
       appsrc name=src format=time is-live=true do-timestamp=true !
-      video/x-h264,stream-format=avc,alignment=au !
-      h264parse !
-      appsink name=sink emit-signals=true sync=false
+      h264parse config-interval=1 !
+      avdec_h264 !
+      videoconvert !
+      video/x-raw,format=I420,width=1280,height=720,framerate=30/1 !
+      jpegenc quality=90 !
+      appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true
     `;
 
     try {
@@ -58,18 +76,61 @@ class StreamProcessor {
       this.gstKit.play();
       this.pipelineInitialized = true;
       logger.info(`GStreamer pipeline initialized for stream: ${streamKey}`);
+      this.startStreaming();
     } catch (error) {
       logger.error("Failed to initialize GStreamer pipeline", error);
     }
   }
 
+  private startStreaming(): void {
+    let framesPulled = 0;
+    let lastLogTime = Date.now();
+    
+    this.streamingInterval = setInterval(() => {
+      if (!this.pipelineInitialized) {
+        if (this.streamingInterval) {
+          clearInterval(this.streamingInterval);
+          this.streamingInterval = null;
+        }
+        return;
+      }
+
+      const frame = this.pullProcessedFrame();
+      if (frame) {
+        framesPulled++;
+        wsLogger.log(`✓ Frame ${framesPulled} pulled from pipeline: ${frame.length} bytes`);
+        
+        // Emit frame event to all subscribers
+        if (this.listenerCount('frame') > 0) {
+          this.emit('frame', frame);
+          wsLogger.log(`✓ Emitted frame to ${this.listenerCount('frame')} subscriber(s)`);
+        }
+      } else {
+        // Log every 5 seconds if no frames
+        const now = Date.now();
+        if (now - lastLogTime > 5000) {
+          wsLogger.warn(`No frames available from pipeline (total pulled: ${framesPulled})`);
+          lastLogTime = now;
+        }
+      }
+    }, 33);
+  }
+
   processVideoBuffer(buffer: Buffer): void {
-    if (!this.pipelineInitialized) return;
+    if (!this.pipelineInitialized) {
+      logger.warn(`Pipeline not initialized, dropping ${buffer.length} bytes of video data`);
+      return;
+    }
 
     try {
-      // Push video buffer to GStreamer pipeline
-      this.gstKit.pushSample("src", buffer);
-      logger.log(`Processed video buffer: ${buffer.length} bytes`);
+      // RTMP video data has a 1-byte header before H.264 data
+      // Skip the first byte (frame type) and send only H.264 data
+      if (buffer.length > 1) {
+        const h264Data = buffer.subarray(1);
+        logger.log(`Pushing ${h264Data.length} bytes to GStreamer pipeline (first 16 bytes: ${h264Data.subarray(0, 16).toString('hex')})`);
+        this.gstKit.pushSample("src", h264Data);
+        logger.log(`✓ Successfully pushed video buffer to pipeline`);
+      }
     } catch (error) {
       logger.error("Failed to process video buffer", error);
     }
@@ -79,7 +140,6 @@ class StreamProcessor {
     if (!this.pipelineInitialized) return;
 
     try {
-      // Push audio buffer to GStreamer pipeline
       this.gstKit.pushSample("src", buffer);
       logger.log(`Processed audio buffer: ${buffer.length} bytes`);
     } catch (error) {
@@ -88,22 +148,37 @@ class StreamProcessor {
   }
 
   pullProcessedFrame(): Buffer | null {
-    if (!this.pipelineInitialized) return null;
+    if (!this.pipelineInitialized) {
+      wsLogger.warn("Cannot pull frame: pipeline not initialized");
+      return null;
+    }
 
     try {
-      const frame = this.gstKit.pullSample("sink");
+      // Use 100ms timeout to allow time for H.264 parsing and decoding
+      const frame = this.gstKit.pullSample("sink", 100);
       if (frame) {
-        logger.log(`Pulled processed frame: ${frame.length} bytes`);
         return frame;
       }
       return null;
     } catch (error) {
-      logger.error("Failed to pull processed frame", error);
+      wsLogger.error("Error pulling frame from pipeline", error);
       return null;
     }
   }
 
+  // Método para verificar el estado del pipeline
+  getPipelineStatus(): { initialized: boolean; hasSubscribers: boolean } {
+    return {
+      initialized: this.pipelineInitialized,
+      hasSubscribers: this.listenerCount('frame') > 0
+    };
+  }
+
   cleanup(): void {
+    if (this.streamingInterval) {
+      clearInterval(this.streamingInterval);
+      this.streamingInterval = null;
+    }
     if (this.pipelineInitialized) {
       this.gstKit.stop();
       this.gstKit.cleanup();
@@ -395,6 +470,8 @@ class RTMPConnection {
     csid: number,
     streamId: number,
   ) {
+    logger.log(`Received message type ${messageType} with ${payload.length} bytes`);
+    
     switch (messageType) {
       case MSG_SET_CHUNK_SIZE:
         if (payload.length >= 4) {
@@ -433,7 +510,7 @@ class RTMPConnection {
         break;
 
       case MSG_VIDEO:
-        logger.log(`Video data: ${payload.length} bytes`);
+        logger.log(`Video data received from RTMP: ${payload.length} bytes`);
         streamProcessor.processVideoBuffer(payload);
         break;
 
@@ -618,6 +695,7 @@ class RTMPConnection {
     this.streamKey = streamKey;
 
     logger.info(`Stream published: ${streamKey}`);
+    logger.info(`Waiting for video data from RTMP client...`);
 
     // Initialize GStreamer pipeline for this stream
     streamProcessor.initialize(streamKey);
@@ -713,10 +791,13 @@ class RTMPConnection {
 
 class RTMPServer {
   private port: number;
+  private wsServer: any;
+  private wsUnsubscribers: WeakMap<any, () => void> = new WeakMap();
 
   constructor(port: number = 1935) {
     this.port = port;
     this.startTCPServer();
+    this.startWebSocketServer();
   }
 
   private startTCPServer() {
@@ -740,6 +821,7 @@ class RTMPServer {
               return;
             }
 
+            logger.log(`Received ${receivedData.length} bytes from RTMP client`);
             conn.handleData(receivedData);
           },
 
@@ -754,12 +836,76 @@ class RTMPServer {
         },
       });
 
-      logger.info(`Server started on rtmp://localhost:${this.port}`);
+      logger.info(`RTMP Server started on rtmp://localhost:${this.port}`);
       logger.info(`OBS Settings:`);
       logger.info(`  Server: rtmp://localhost:${this.port}/live`);
       logger.info(`  Stream Key: any_key`);
     } catch (error: any) {
       logger.error(`Fatal error: ${error.message}`);
+      process.exit(1);
+    }
+  }
+
+  private startWebSocketServer() {
+    try {
+      this.wsServer = Bun.serve({
+        port: 8080,
+        fetch: async (req) => {
+          const url = new URL(req.url);
+
+          if (url.pathname === "/") {
+            return new Response(Bun.file("./examples/websocket-client.html"), {
+              headers: { "Content-Type": "text/html" },
+            });
+          }
+
+          if (url.pathname === "/ws") {
+            const upgraded = this.wsServer.upgrade(req);
+            if (!upgraded) {
+              return new Response("WebSocket upgrade failed", { status: 400 });
+            }
+            return new Response();
+          }
+
+          return new Response("Not found", { status: 404 });
+        },
+        websocket: {
+          message: (ws, message) => {
+          },
+          open: (ws) => {
+            wsLogger.info("WebSocket client connected");
+            
+            // Subscribe to frame events
+            const unsubscribe = streamProcessor.onFrame((frame: Buffer) => {
+              try {
+                const base64 = frame.toString('base64');
+                const data = JSON.stringify({ type: 'frame', data: base64 });
+                ws.send(data);
+              } catch (error) {
+                wsLogger.error("Failed to send frame to WebSocket client", error);
+              }
+            });
+            
+            // Store unsubscribe function
+            this.wsUnsubscribers.set(ws, unsubscribe);
+          },
+          close: (ws, code, message) => {
+            wsLogger.info("WebSocket client disconnected");
+            
+            // Unsubscribe from frame events
+            const unsubscribe = this.wsUnsubscribers.get(ws);
+            if (unsubscribe) {
+              unsubscribe();
+              this.wsUnsubscribers.delete(ws);
+            }
+          },
+        },
+      });
+
+      wsLogger.info(`WebSocket server started on ws://localhost:8080`);
+      wsLogger.info(`Open http://localhost:8080 in your browser`);
+    } catch (error: any) {
+      wsLogger.error(`Fatal error: ${error.message}`);
       process.exit(1);
     }
   }

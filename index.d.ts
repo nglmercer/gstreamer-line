@@ -60,23 +60,24 @@ export declare class GstKit {
    */
   stop(): void
   /**
-   * Pulls a sample from a named AppSink element
+   * Pulls a sample from a named AppSink element with a configurable timeout
    *
    * # Arguments
    * * `element_name` - The name of the AppSink element
+   * * `timeout_ms` - Timeout in milliseconds (default: 100ms, use 0 for non-blocking)
    *
    * # Returns
    * * `Result<Option<Buffer>>` - A Buffer containing the sample data, or null if no sample is available
    *
    * # Example
    * ```javascript
-   * const frame = kit.pullSample("mysink");
+   * const frame = kit.pullSample("mysink", 100);
    * if (frame) {
    *   console.log("Got frame of size:", frame.length);
    * }
    * ```
    */
-  pullSample(elementName: string): Buffer | null
+  pullSample(elementName: string, timeoutMs?: number | undefined): Buffer | null
   /**
    * Pushes a buffer to a named AppSrc element
    *

@@ -7,7 +7,7 @@ class Logger {
   private debugMode: boolean;
   private logPrefix: string;
 
-  constructor(debugMode: boolean = false, prefix: string = "[RTMP]") {
+  constructor(debugMode: boolean = true, prefix: string = "[RTMP]") {
     this.debugMode = debugMode;
     this.logPrefix = prefix;
   }
@@ -46,3 +46,4 @@ class Logger {
 }
 
 export { Logger };
+

@@ -169,17 +169,18 @@ impl GstKit {
     }
   }
 
-  /// Pulls a sample from a named AppSink element
+  /// Pulls a sample from a named AppSink element with a configurable timeout
   ///
   /// # Arguments
   /// * `element_name` - The name of the AppSink element
+  /// * `timeout_ms` - Timeout in milliseconds (default: 100ms, use 0 for non-blocking)
   ///
   /// # Returns
   /// * `Result<Option<Buffer>>` - A Buffer containing the sample data, or null if no sample is available
   ///
   /// # Example
   /// ```javascript
-  /// const frame = kit.pullSample("mysink");
+  /// const frame = kit.pullSample("mysink", 100);
   /// if (frame) {
   ///   console.log("Got frame of size:", frame.length);
   /// }
@@ -189,6 +190,7 @@ impl GstKit {
     &self,
     _env: Env,
     element_name: String,
+    #[napi(ts_arg_type = "number | undefined")] timeout_ms: Option<u32>,
   ) -> Result<Option<napi::bindgen_prelude::Buffer>> {
     let pipeline_guard = self.pipeline.lock().unwrap();
     let pipeline = pipeline_guard.as_ref().ok_or_else(|| {
@@ -212,7 +214,10 @@ impl GstKit {
       )
     })?;
 
-    match appsink.try_pull_sample(gst::ClockTime::from_mseconds(5)) {
+    // Default to 100ms timeout if not specified (long enough for frame processing)
+    let timeout = timeout_ms.unwrap_or(100);
+
+    match appsink.try_pull_sample(gst::ClockTime::from_mseconds(timeout as u64)) {
       Some(sample) => {
         let buffer: &gst::BufferRef = sample
           .buffer()
