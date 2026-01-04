@@ -424,108 +424,77 @@ export async function generateVideoWithAudioCodecs(
   return { videoPath: outputPath, videoCodec, audioCodec };
 }
 
+// ============================================================================
+// Codec Detection with Caching
+// ============================================================================
+
+// Cache to prevent redundant GStreamer pipeline initializations
+const encoderCache: Map<VideoCodecKey, string | null> = new Map();
+
 /**
- * Test if a codec is available (including alternative encoders)
+ * Internal helper to find the first working encoder for a codec
  */
-export async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean> {
+async function findBestEncoder(codecKey: VideoCodecKey): Promise<string | null> {
+  if (encoderCache.has(codecKey)) return encoderCache.get(codecKey)!;
+
   const codec = VIDEO_CODECS[codecKey];
   const kit = new GstKit();
+  const candidates = [codec.encoder, ...(codec.alternativeEncoders || [])];
 
-  // Try primary encoder first
-  try {
-    const pipeline = `videotestsrc num-buffers=1 ! ${codec.encoder} ! fakesink`;
-    kit.setPipeline(pipeline);
-    kit.play();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    kit.stop();
-    kit.cleanup();
-    return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('no element')) {
-      // Try alternative encoders if available
-      if (codec.alternativeEncoders && codec.alternativeEncoders.length > 0) {
-        for (const altEncoder of codec.alternativeEncoders) {
-          try {
-            const altPipeline = `videotestsrc num-buffers=1 ! ${altEncoder} ! fakesink`;
-            kit.setPipeline(altPipeline);
-            kit.play();
-            await new Promise(resolve => setTimeout(resolve, 100));
-            kit.stop();
-            kit.cleanup();
-            console.log(`  [INFO] Using alternative encoder ${altEncoder} for ${codecKey}`);
-            return true;
-          } catch (altError) {
-            if (altError instanceof Error && altError.message.includes('no element')) {
-              continue; // Try next alternative
-            }
-            kit.cleanup();
-            throw altError;
-          }
-        }
+  for (const encoder of candidates) {
+    try {
+      // num-buffers=1 and fakesink is the fastest way to probe
+      kit.setPipeline(`videotestsrc num-buffers=1 ! ${encoder} ! fakesink`);
+      kit.play();
+      
+      // Wait briefly for state change; a "no element" error usually happens immediately on play()
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      kit.stop();
+      kit.cleanup();
+      
+      encoderCache.set(codecKey, encoder);
+      return encoder;
+    } catch (error) {
+      kit.cleanup(); // Ensure cleanup happens even on failure
+      if (error instanceof Error && error.message.includes('no element')) {
+        continue;
       }
-      return false;
+      // If it's a different error (e.g., plugin crash), we might want to know
+      console.error(`Warning: Unexpected error probing ${encoder}:`, error);
     }
-    throw error;
   }
+
+  encoderCache.set(codecKey, null);
+  return null;
 }
 
 /**
- * Get the actual encoder to use for a codec (primary or alternative)
+ * Get the actual encoder to use for a codec
  */
 export async function getCodecEncoder(codecKey: VideoCodecKey): Promise<string> {
-  const codec = VIDEO_CODECS[codecKey];
-  const kit = new GstKit();
-
-  // Try primary encoder first
-  try {
-    const pipeline = `videotestsrc num-buffers=1 ! ${codec.encoder} ! fakesink`;
-    kit.setPipeline(pipeline);
-    kit.play();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    kit.stop();
-    kit.cleanup();
-    return codec.encoder;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('no element')) {
-      // Try alternative encoders if available
-      if (codec.alternativeEncoders && codec.alternativeEncoders.length > 0) {
-        for (const altEncoder of codec.alternativeEncoders) {
-          try {
-            const altPipeline = `videotestsrc num-buffers=1 ! ${altEncoder} ! fakesink`;
-            kit.setPipeline(altPipeline);
-            kit.play();
-            await new Promise(resolve => setTimeout(resolve, 100));
-            kit.stop();
-            kit.cleanup();
-            return altEncoder;
-          } catch (altError) {
-            if (altError instanceof Error && altError.message.includes('no element')) {
-              continue; // Try next alternative
-            }
-            kit.cleanup();
-            throw altError;
-          }
-        }
-      }
-      throw new Error(`No encoder available for codec ${codecKey}`);
-    }
-    throw error;
+  const encoder = await findBestEncoder(codecKey);
+  if (!encoder) {
+    throw new Error(`No encoder available for codec ${codecKey}`);
   }
+  return encoder;
 }
 
 /**
- * Get list of available codecs
+ * Test if a codec is available
+ */
+export async function isCodecAvailable(codecKey: VideoCodecKey): Promise<boolean> {
+  const encoder = await findBestEncoder(codecKey);
+  return encoder !== null;
+}
+
+/**
+ * Get list of available codecs (now much faster due to caching)
  */
 export async function getAvailableCodecs(): Promise<VideoCodecKey[]> {
-  const available: VideoCodecKey[] = [];
-  
-  for (const codecKey of Object.keys(VIDEO_CODECS) as VideoCodecKey[]) {
-    if (await isCodecAvailable(codecKey)) {
-      available.push(codecKey);
-    }
-  }
-  
-  return available;
+  const keys = Object.keys(VIDEO_CODECS) as VideoCodecKey[];
+  const availability = await Promise.all(keys.map(k => isCodecAvailable(k)));
+  return keys.filter((_, index) => availability[index]);
 }
 
 /**

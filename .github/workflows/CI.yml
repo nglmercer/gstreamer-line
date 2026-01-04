@@ -2,24 +2,21 @@ name: CI
 env:
   DEBUG: napi:*
   APP_NAME: package-template
-  MACOSX_DEPLOYMENT_TARGET: '10.13'
-  CARGO_INCREMENTAL: '1'
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+  CARGO_INCREMENTAL: "1"
 on:
   push:
     branches:
       - main
     tags-ignore:
-      - '**'
+      - "**"
     paths-ignore:
-      - '**/*.md'
+      - "**/*.md"
       - LICENSE
-      - '**/*.gitignore'
+      - "**/*.gitignore"
       - .editorconfig
       - docs/**
   pull_request: null
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   lint:
     name: Lint
@@ -32,28 +29,37 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Install GStreamer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgobject-2.0-dev pkg-config gstreamer1.0-dev gstreamer1.0-plugins-base-dev gstreamer1.0-plugins-good-dev gstreamer1.0-plugins-bad-dev
+
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Install dependencies
+      - name: Install
         run: bun install
 
       - name: Oxlint
         run: bun run lint
 
       - name: Cargo fmt
-        run: cargo fmt -- --check
+        run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy
+        env:
+          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig
 
   build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.host }}
     strategy:
       fail-fast: false
       matrix:
-        settings:
+        include:
           - host: macos-latest
             target: x86_64-apple-darwin
             build: bun run build --target x86_64-apple-darwin
@@ -63,17 +69,6 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: bun run build --target x86_64-unknown-linux-gnu --use-napi-cross
-          - host: macos-latest
-            target: aarch64-apple-darwin
-            build: bun run build --target aarch64-apple-darwin
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            build: bun run build --target aarch64-unknown-linux-gnu --use-napi-cross
-          - host: windows-latest
-            target: aarch64-pc-windows-msvc
-            build: bun run build --target aarch64-pc-windows-msvc
-    name: stable - ${{ matrix.settings.target }}
-    runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,7 +81,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: ${{ matrix.settings.target }}
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -98,50 +93,47 @@ jobs:
             ~/.napi-rs
             .cargo-cache
             target/
-          key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+          key: ${{ matrix.target }}-cargo-${{ matrix.host }}
 
       - name: Setup toolchain
-        run: ${{ matrix.settings.setup }}
-        if: ${{ matrix.settings.setup }}
-        shell: bash
+        run: |
+          if [ "${{ matrix.host }}" = "macos-latest" ]; then
+            echo "setup=brew install"
+          else
+            echo "setup=rustup default stable"
+          fi
 
       - name: Install dependencies
         run: bun install
 
       - name: Build
-        run: ${{ matrix.settings.build }}
+        run: ${{ matrix.build }}
         shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
+          name: bindings-${{ matrix.target }}
           path: |
             ${{ env.APP_NAME }}.*.node
             ${{ env.APP_NAME }}.*.wasm
           if-no-files-found: error
 
   test-native:
-    name: Test on ${{ matrix.settings.target }}
+    name: Test on ${{ matrix.host }}
     needs:
       - build
     strategy:
       fail-fast: false
       matrix:
-        settings:
+        include:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-          - host: windows-11-arm
-            target: aarch64-pc-windows-msvc
-          - host: macos-latest
-            target: aarch64-apple-darwin
           - host: macos-latest
             target: x86_64-apple-darwin
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
           - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.settings.host }}
+    runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4
 
@@ -156,7 +148,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
+          name: bindings-${{ matrix.target }}
           path: .
 
       - name: List packages
@@ -186,7 +178,7 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: create npm dirs
+      - name: Create npm dirs
         run: bun run napi create-npm-dirs
 
       - name: Download all artifacts
