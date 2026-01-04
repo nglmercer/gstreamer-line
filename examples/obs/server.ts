@@ -91,15 +91,16 @@ class StreamProcessor {
       // Pipeline for RTMP H.264 data - using the detected decoder
       // RTMP sends H.264 in AVCC format (avc1), we need to convert to byte-stream
       // h264parse will handle the conversion from AVCC to byte-stream format
+      // Output RGBA format for direct display in canvas
       const pipelineString = `
         appsrc name=src format=bytes is-live=true do-timestamp=true caps="video/x-h264,stream-format=avc,alignment=au" !
         h264parse !
         video/x-h264,stream-format=byte-stream,alignment=au !
         ${h264Decoder} !
         videoconvert !
-        video/x-raw,format=I420 !
-        jpegenc quality=90 !
-        appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true
+        videoscale !
+        video/x-raw,format=RGBA,width=320,height=240 !
+        appsink name=sink emit-signals=true sync=false max-buffers=10
       `;
 
       this.gstKit.setPipeline(pipelineString);
@@ -125,7 +126,9 @@ class StreamProcessor {
     let frameCount = 0;
     const frameInterval = 1000 / FRAME_RATE; // ms between frames (~33.33ms for 30fps)
 
-    this.streamingInterval = setInterval(() => {
+    // Wait a bit for the decoder to initialize before starting the loop
+    setTimeout(() => {
+      this.streamingInterval = setInterval(() => {
       if (!this.pipelineInitialized || !this.gstKit) {
         return;
       }
@@ -153,6 +156,7 @@ class StreamProcessor {
         wsLogger.error("Error pulling frame from pipeline", error);
       }
     }, frameInterval);
+    }, 500); // 500ms delay to allow decoder to initialize
   }
 
   private broadcastFrame(frameBuffer: Buffer) {
