@@ -133,3 +133,4 @@ __test__/temp_output/*
 
 # GStreamer library symlinks for Bazzite (system libraries)
 gst-lib/
+temp_frames/*

@@ -130,47 +130,57 @@ pub fn get_media_info(path: String) -> Result<MediaInfo, napi::Error> {
     )));
   }
 
+  // Check if file is empty
+  let metadata = std::fs::metadata(&path_buf)
+    .map_err(|e| napi::Error::from_reason(format!("Failed to read file metadata: {}", e)))?;
+
+  let file_size = metadata.len();
+  if file_size == 0 {
+    return Err(napi::Error::from_reason("File is empty"));
+  }
+  if file_size < 32 {
+    return Err(napi::Error::from_reason(
+      "File is too small to be a valid media file",
+    ));
+  }
+
   // Detect format from file
   let detected_format = format::detect_format(&path_buf);
-  
+
   let format_name = match &detected_format {
-      format::MediaFormat::Ivf => "ivf",
-      format::MediaFormat::Matroska => "matroska",
-      format::MediaFormat::Y4m => "y4m",
-      format::MediaFormat::Unknown(name) => name,
+    format::MediaFormat::Ivf => "ivf",
+    format::MediaFormat::Matroska => "matroska",
+    format::MediaFormat::Y4m => "y4m",
+    format::MediaFormat::Unknown(name) => name,
   };
-  
+
   let format_long_name = format::format_long_name(&detected_format);
-  
-  // Open file and extract media information
-  let file = std::fs::File::open(&path_buf)
-    .map_err(|e| napi::Error::from_reason(format!("Failed to open file: {}", e)))?;
-  
-  let metadata = file.metadata()
-    .map_err(|e| napi::Error::from_reason(format!("Failed to read file metadata: {}", e)))?;
-  
-  let file_size = metadata.len();
-  
+
   // Read file to detect codec and stream information
   let mut buffer = vec![0u8; std::cmp::min(8192, file_size as usize)];
   use std::io::Read;
   let mut file_handle = std::fs::File::open(&path_buf)?;
   let _bytes_read = file_handle.read(&mut buffer)?;
-  
+
   // Detect codec from file signature
   let (codec_name, codec_type, width, height, frame_rate, sample_rate, channels) =
     detect_codec_from_data(&buffer, &detected_format, &path_buf);
-  
+
+  // Validate that we got meaningful data
+  if codec_name.is_empty() && width.is_none() && height.is_none() {
+    return Err(napi::Error::from_reason("Invalid or corrupted media file"));
+  }
+
   // Calculate approximate duration based on file size and codec
   let duration = estimate_duration(file_size, &codec_name, width, height, frame_rate);
-  
+
   // Calculate approximate bit rate
   let bit_rate = if duration > 0.0 {
     Some((file_size as f64 * 8.0 / duration) as i64)
   } else {
     None
   };
-  
+
   // Create stream info
   let stream_info = if !codec_name.is_empty() {
     vec![StreamInfo {
@@ -188,7 +198,7 @@ pub fn get_media_info(path: String) -> Result<MediaInfo, napi::Error> {
   } else {
     vec![]
   };
-  
+
   Ok(MediaInfo {
     format: FormatInfo {
       name: format_name.to_string(),
@@ -203,13 +213,21 @@ pub fn get_media_info(path: String) -> Result<MediaInfo, napi::Error> {
 }
 
 /// Type alias for codec detection result to reduce type complexity
-type CodecDetectionResult = (String, String, Option<i32>, Option<i32>, Option<f64>, Option<i32>, Option<i32>);
+type CodecDetectionResult = (
+  String,
+  String,
+  Option<i32>,
+  Option<i32>,
+  Option<f64>,
+  Option<i32>,
+  Option<i32>,
+);
 
 /// Detect codec from file data and format
 fn detect_codec_from_data(
   data: &[u8],
   format: &format::MediaFormat,
-  path: &Path
+  path: &Path,
 ) -> CodecDetectionResult {
   match format {
     format::MediaFormat::Ivf => {
@@ -224,15 +242,23 @@ fn detect_codec_from_data(
         } else {
           None
         };
-        
+
         let codec_name = match fourcc {
           "AV01" => "av1",
           "VP90" => "vp9",
           "VP80" => "vp8",
           _ => fourcc,
         };
-        
-        (codec_name.to_string(), "video".to_string(), Some(width), Some(height), frame_rate, None, None)
+
+        (
+          codec_name.to_string(),
+          "video".to_string(),
+          Some(width),
+          Some(height),
+          frame_rate,
+          None,
+          None,
+        )
       } else {
         (String::new(), String::new(), None, None, None, None, None)
       }
@@ -241,13 +267,24 @@ fn detect_codec_from_data(
       // Matroska/WebM - detect from file signature
       if data.len() >= 4 && &data[0..4] == b"\x1a\x45\xdf\xa3" {
         // Try to detect codec from file extension or content
-        let ext = path.extension().and_then(|e: &std::ffi::OsStr| e.to_str()).unwrap_or("");
+        let ext = path
+          .extension()
+          .and_then(|e: &std::ffi::OsStr| e.to_str())
+          .unwrap_or("");
         let (codec_name, codec_type) = match ext {
           "webm" => ("vp9", "video"),
           "mkv" => ("h264", "video"),
           _ => ("unknown", "unknown"),
         };
-        (codec_name.to_string(), codec_type.to_string(), None, None, None, None, None)
+        (
+          codec_name.to_string(),
+          codec_type.to_string(),
+          None,
+          None,
+          None,
+          None,
+          None,
+        )
       } else {
         (String::new(), String::new(), None, None, None, None, None)
       }
@@ -256,12 +293,12 @@ fn detect_codec_from_data(
       // Y4M header parsing
       if let Some(header_end) = data.iter().position(|&b| b == b'\n') {
         let header = std::str::from_utf8(&data[..header_end]).unwrap_or("");
-        
+
         // Parse Y4M header
         let mut width = None;
         let mut height = None;
         let mut frame_rate = None;
-        
+
         for part in header.split_whitespace() {
           if let Some(rest) = part.strip_prefix("W") {
             width = rest.parse::<i32>().ok();
@@ -276,25 +313,37 @@ fn detect_codec_from_data(
             }
           }
         }
-        
-        ("raw".to_string(), "video".to_string(), width, height, frame_rate, None, None)
+
+        (
+          "raw".to_string(),
+          "video".to_string(),
+          width,
+          height,
+          frame_rate,
+          None,
+          None,
+        )
       } else {
         (String::new(), String::new(), None, None, None, None, None)
       }
     }
-    format::MediaFormat::Unknown(_) => {
-      (String::new(), String::new(), None, None, None, None, None)
-    }
+    format::MediaFormat::Unknown(_) => (String::new(), String::new(), None, None, None, None, None),
   }
 }
 
 /// Estimate duration based on file size and codec
-fn estimate_duration(file_size: u64, codec_name: &str, width: Option<i32>, height: Option<i32>, _frame_rate: Option<f64>) -> f64 {
+fn estimate_duration(
+  file_size: u64,
+  codec_name: &str,
+  width: Option<i32>,
+  height: Option<i32>,
+  _frame_rate: Option<f64>,
+) -> f64 {
   // Rough estimation based on typical bitrates
   let pixels = width.unwrap_or(640) * height.unwrap_or(480);
-  
+
   let bitrate = match codec_name {
-    "av1" => pixels as f64 * 0.1, // ~0.1 bpp for AV1
+    "av1" => pixels as f64 * 0.1,  // ~0.1 bpp for AV1
     "vp9" => pixels as f64 * 0.15, // ~0.15 bpp for VP9
     "vp8" => pixels as f64 * 0.2,  // ~0.2 bpp for VP8
     "h264" => pixels as f64 * 0.2, // ~0.2 bpp for H.264
@@ -302,7 +351,7 @@ fn estimate_duration(file_size: u64, codec_name: &str, width: Option<i32>, heigh
     "raw" => pixels as f64 * 1.5,  // 1.5 bytes per pixel for YUV420
     _ => pixels as f64 * 0.2,
   };
-  
+
   if bitrate > 0.0 {
     (file_size as f64 * 8.0) / bitrate
   } else {
@@ -335,7 +384,7 @@ pub fn transcode(options: TranscodeOptions) -> Result<(), napi::Error> {
   // Read input file
   let input_data = std::fs::read(&input_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to read input file: {}", e)))?;
-  
+
   // Process based on format combination
   match (&input_format, &output_format) {
     (format::MediaFormat::Ivf, format::MediaFormat::Matroska) => {
@@ -371,23 +420,31 @@ pub fn transcode(options: TranscodeOptions) -> Result<(), napi::Error> {
 fn transcode_ivf_to_matroska(
   input_data: &[u8],
   output_path: &PathBuf,
-  options: &TranscodeOptions
+  options: &TranscodeOptions,
 ) -> Result<(), napi::Error> {
   let mut output_file = std::fs::File::create(output_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse IVF header
   if input_data.len() < 32 {
-    return Err(napi::Error::from_reason("Invalid IVF file: header too short"));
+    return Err(napi::Error::from_reason(
+      "Invalid IVF file: header too short",
+    ));
   }
 
   let width = u16::from_le_bytes([input_data[24], input_data[25]]) as i32;
   let height = u16::from_le_bytes([input_data[26], input_data[27]]) as i32;
-  let _timebase_den = u32::from_le_bytes([input_data[28], input_data[29], input_data[30], input_data[31]]);
+  let _timebase_den = u32::from_le_bytes([
+    input_data[28],
+    input_data[29],
+    input_data[30],
+    input_data[31],
+  ]);
   let frame_rate = 30.0;
-  
+
   // Apply video codec options if provided
-  let (final_width, final_height, final_frame_rate) = if let Some(video_opts) = &options.video_codec {
+  let (final_width, final_height, final_frame_rate) = if let Some(video_opts) = &options.video_codec
+  {
     (
       video_opts.width.unwrap_or(width),
       video_opts.height.unwrap_or(height),
@@ -398,8 +455,13 @@ fn transcode_ivf_to_matroska(
   };
 
   // Write Matroska EBML header (simplified)
-  write_matroska_header(&mut output_file, final_width, final_height, final_frame_rate)?;
-  
+  write_matroska_header(
+    &mut output_file,
+    final_width,
+    final_height,
+    final_frame_rate,
+  )?;
+
   // Write IVF frames as Matroska blocks
   let mut offset = 32; // Skip IVF header
   let mut frame_count = 0u32;
@@ -453,19 +515,25 @@ fn transcode_ivf_to_matroska(
 fn transcode_matroska_to_ivf(
   input_data: &[u8],
   output_path: &PathBuf,
-  options: &TranscodeOptions
+  options: &TranscodeOptions,
 ) -> Result<(), napi::Error> {
   let mut output_file = std::fs::File::create(output_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Default dimensions
-  let width = options.video_codec.as_ref()
+  let width = options
+    .video_codec
+    .as_ref()
     .and_then(|v| v.width)
     .unwrap_or(640);
-  let height = options.video_codec.as_ref()
+  let height = options
+    .video_codec
+    .as_ref()
     .and_then(|v| v.height)
     .unwrap_or(480);
-  let frame_rate = options.video_codec.as_ref()
+  let frame_rate = options
+    .video_codec
+    .as_ref()
     .and_then(|v| v.frame_rate)
     .unwrap_or(30.0);
 
@@ -493,13 +561,15 @@ fn transcode_matroska_to_ivf(
 fn transcode_y4m_to_ivf(
   input_data: &[u8],
   output_path: &PathBuf,
-  options: &TranscodeOptions
+  options: &TranscodeOptions,
 ) -> Result<(), napi::Error> {
   let mut output_file = std::fs::File::create(output_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse Y4M header
-  let header_end = input_data.iter().position(|&b| b == b'\n')
+  let header_end = input_data
+    .iter()
+    .position(|&b| b == b'\n')
     .ok_or_else(|| napi::Error::from_reason("Invalid Y4M file: no header found"))?;
 
   let header = std::str::from_utf8(&input_data[..header_end])
@@ -525,7 +595,7 @@ fn transcode_y4m_to_ivf(
     // Look for FRAME marker
     if offset + 5 <= input_data.len() && &input_data[offset..offset + 5] == b"FRAME" {
       offset += 5;
-      
+
       // Skip to newline
       while offset < input_data.len() && input_data[offset] != b'\n' {
         offset += 1;
@@ -571,14 +641,16 @@ fn transcode_y4m_to_ivf(
 fn transcode_ivf_to_y4m(
   input_data: &[u8],
   output_path: &PathBuf,
-  options: &TranscodeOptions
+  options: &TranscodeOptions,
 ) -> Result<(), napi::Error> {
   let mut output_file = std::fs::File::create(output_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse IVF header
   if input_data.len() < 32 {
-    return Err(napi::Error::from_reason("Invalid IVF file: header too short"));
+    return Err(napi::Error::from_reason(
+      "Invalid IVF file: header too short",
+    ));
   }
 
   let mut width = u16::from_le_bytes([input_data[24], input_data[25]]) as i32;
@@ -636,13 +708,15 @@ fn transcode_ivf_to_y4m(
 fn transcode_y4m_to_matroska(
   input_data: &[u8],
   output_path: &PathBuf,
-  options: &TranscodeOptions
+  options: &TranscodeOptions,
 ) -> Result<(), napi::Error> {
   let mut output_file = std::fs::File::create(output_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse Y4M header
-  let header_end = input_data.iter().position(|&b| b == b'\n')
+  let header_end = input_data
+    .iter()
+    .position(|&b| b == b'\n')
     .ok_or_else(|| napi::Error::from_reason("Invalid Y4M file: no header found"))?;
 
   let header = std::str::from_utf8(&input_data[..header_end])
@@ -667,7 +741,7 @@ fn transcode_y4m_to_matroska(
   while offset < input_data.len() {
     if offset + 5 <= input_data.len() && &input_data[offset..offset + 5] == b"FRAME" {
       offset += 5;
-      
+
       while offset < input_data.len() && input_data[offset] != b'\n' {
         offset += 1;
       }
@@ -713,18 +787,24 @@ fn transcode_y4m_to_matroska(
 fn transcode_matroska_to_y4m(
   input_data: &[u8],
   output_path: &PathBuf,
-  options: &TranscodeOptions
+  options: &TranscodeOptions,
 ) -> Result<(), napi::Error> {
   let mut output_file = std::fs::File::create(output_path)
     .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
-  let width = options.video_codec.as_ref()
+  let width = options
+    .video_codec
+    .as_ref()
     .and_then(|v| v.width)
     .unwrap_or(640);
-  let height = options.video_codec.as_ref()
+  let height = options
+    .video_codec
+    .as_ref()
     .and_then(|v| v.height)
     .unwrap_or(480);
-  let frame_rate = options.video_codec.as_ref()
+  let frame_rate = options
+    .video_codec
+    .as_ref()
     .and_then(|v| v.frame_rate)
     .unwrap_or(30.0);
 
@@ -820,92 +900,116 @@ pub fn transform_format(input_path: String, output_path: String) -> Result<(), n
   // Read input file
   let input_data = std::fs::read(&input_buf)
     .map_err(|e| napi::Error::from_reason(format!("Failed to read input file: {}", e)))?;
-  
+
   // Process based on format combination using real transcoding functions
   match (&input_format, &output_format) {
     (format::MediaFormat::Ivf, format::MediaFormat::Matroska) => {
-      transcode_ivf_to_matroska(&input_data, &output_buf, &TranscodeOptions {
-        input_path,
-        output_path,
-        video_codec: None,
-        audio_codec: None,
-        video_filter: None,
-        audio_filter: None,
-        format: None,
-        start_time: None,
-        duration: None,
-        seek_to: None,
-      })?;
+      transcode_ivf_to_matroska(
+        &input_data,
+        &output_buf,
+        &TranscodeOptions {
+          input_path,
+          output_path,
+          video_codec: None,
+          audio_codec: None,
+          video_filter: None,
+          audio_filter: None,
+          format: None,
+          start_time: None,
+          duration: None,
+          seek_to: None,
+        },
+      )?;
     }
     (format::MediaFormat::Matroska, format::MediaFormat::Ivf) => {
-      transcode_matroska_to_ivf(&input_data, &output_buf, &TranscodeOptions {
-        input_path,
-        output_path,
-        video_codec: None,
-        audio_codec: None,
-        video_filter: None,
-        audio_filter: None,
-        format: None,
-        start_time: None,
-        duration: None,
-        seek_to: None,
-      })?;
+      transcode_matroska_to_ivf(
+        &input_data,
+        &output_buf,
+        &TranscodeOptions {
+          input_path,
+          output_path,
+          video_codec: None,
+          audio_codec: None,
+          video_filter: None,
+          audio_filter: None,
+          format: None,
+          start_time: None,
+          duration: None,
+          seek_to: None,
+        },
+      )?;
     }
     (format::MediaFormat::Y4m, format::MediaFormat::Ivf) => {
-      transcode_y4m_to_ivf(&input_data, &output_buf, &TranscodeOptions {
-        input_path,
-        output_path,
-        video_codec: None,
-        audio_codec: None,
-        video_filter: None,
-        audio_filter: None,
-        format: None,
-        start_time: None,
-        duration: None,
-        seek_to: None,
-      })?;
+      transcode_y4m_to_ivf(
+        &input_data,
+        &output_buf,
+        &TranscodeOptions {
+          input_path,
+          output_path,
+          video_codec: None,
+          audio_codec: None,
+          video_filter: None,
+          audio_filter: None,
+          format: None,
+          start_time: None,
+          duration: None,
+          seek_to: None,
+        },
+      )?;
     }
     (format::MediaFormat::Ivf, format::MediaFormat::Y4m) => {
-      transcode_ivf_to_y4m(&input_data, &output_buf, &TranscodeOptions {
-        input_path,
-        output_path,
-        video_codec: None,
-        audio_codec: None,
-        video_filter: None,
-        audio_filter: None,
-        format: None,
-        start_time: None,
-        duration: None,
-        seek_to: None,
-      })?;
+      transcode_ivf_to_y4m(
+        &input_data,
+        &output_buf,
+        &TranscodeOptions {
+          input_path,
+          output_path,
+          video_codec: None,
+          audio_codec: None,
+          video_filter: None,
+          audio_filter: None,
+          format: None,
+          start_time: None,
+          duration: None,
+          seek_to: None,
+        },
+      )?;
     }
     (format::MediaFormat::Y4m, format::MediaFormat::Matroska) => {
-      transcode_y4m_to_matroska(&input_data, &output_buf, &TranscodeOptions {
-        input_path,
-        output_path,
-        video_codec: None,
-        audio_codec: None,
-        video_filter: None,
-        audio_filter: None,
-        format: None,
-        start_time: None,
-        duration: None,
-        seek_to: None,
-      })?;
+      transcode_y4m_to_matroska(
+        &input_data,
+        &output_buf,
+        &TranscodeOptions {
+          input_path,
+          output_path,
+          video_codec: None,
+          audio_codec: None,
+          video_filter: None,
+          audio_filter: None,
+          format: None,
+          start_time: None,
+          duration: None,
+          seek_to: None,
+        },
+      )?;
     }
     (format::MediaFormat::Matroska, format::MediaFormat::Y4m) => {
-      transcode_matroska_to_y4m(&input_data, &output_buf, &TranscodeOptions {
-        input_path,
-        output_path,
-        video_codec: None,
-        audio_codec: None,
-        video_filter: None,
-        audio_filter: None,
-        format: None,
-        start_time: None,
-        duration: None,
-        seek_to: None,
-      })?;
+      transcode_matroska_to_y4m(
+        &input_data,
+        &output_buf,
+        &TranscodeOptions {
+          input_path,
+          output_path,
+          video_codec: None,
+          audio_codec: None,
+          video_filter: None,
+          audio_filter: None,
+          format: None,
+          start_time: None,
+          duration: None,
+          seek_to: None,
+        },
+      )?;
     }
     _ => {
       return Err(napi::Error::from_reason(format!(
@@ -923,7 +1027,7 @@ fn write_ivf_header<W: std::io::Write>(
   writer: &mut W,
   width: i32,
   height: i32,
-  _frame_rate: f64
+  _frame_rate: f64,
 ) -> Result<(), napi::Error> {
   writer.write_all(b"DKIF")?;
   writer.write_all(&[0u8; 4])?; // Version
@@ -933,7 +1037,7 @@ fn write_ivf_header<W: std::io::Write>(
   writer.write_all(&height.to_le_bytes()[..2])?;
   writer.write_all(&[30u8, 0u8, 0u8, 0u8])?; // Timebase numerator
   writer.write_all(&[1u8, 0u8, 0u8, 0u8])?; // Timebase denominator
-  
+
   Ok(())
 }
 
@@ -941,13 +1045,13 @@ fn write_ivf_header<W: std::io::Write>(
 fn write_ivf_frame<W: std::io::Write>(
   writer: &mut W,
   frame_data: &[u8],
-  timestamp: u64
+  timestamp: u64,
 ) -> Result<(), napi::Error> {
   let frame_size = frame_data.len() as u32;
   writer.write_all(&frame_size.to_le_bytes())?;
   writer.write_all(&timestamp.to_le_bytes())?;
   writer.write_all(frame_data)?;
-  
+
   Ok(())
 }
 
@@ -956,7 +1060,7 @@ fn write_matroska_header<W: std::io::Write>(
   writer: &mut W,
   _width: i32,
   _height: i32,
-  _frame_rate: f64
+  _frame_rate: f64,
 ) -> Result<(), napi::Error> {
   // EBML header
   writer.write_all(&[0x1a, 0x45, 0xdf, 0xa3])?;
@@ -971,7 +1075,7 @@ fn write_matroska_header<W: std::io::Write>(
   writer.write_all(&[0x42, 0x82])?; // DocType
   writer.write_all(&[0x84])?;
   writer.write_all(b"webm")?;
-  
+
   Ok(())
 }
 
@@ -980,11 +1084,11 @@ fn write_matroska_simpleblock<W: std::io::Write>(
   writer: &mut W,
   frame_data: &[u8],
   timestamp: u64,
-  _track_number: u32
+  _track_number: u32,
 ) -> Result<(), napi::Error> {
   // SimpleBlock element ID (0xA3)
   writer.write_all(&[0xA3])?;
-  
+
   // Size (variable length)
   let size = frame_data.len() + 4; // 4 bytes for track number + timestamp + flags
   if size < 0x7F {
@@ -992,32 +1096,30 @@ fn write_matroska_simpleblock<W: std::io::Write>(
   } else {
     writer.write_all(&[0x80 | ((size >> 8) as u8), (size & 0xFF) as u8])?;
   }
-  
+
   // Track number
   writer.write_all(&[0x81])?; // Track 1
-  
+
   // Timestamp (signed, 2 bytes)
   writer.write_all(&[(timestamp & 0xFF) as u8, ((timestamp >> 8) & 0xFF) as u8])?;
-  
+
   // Flags
   writer.write_all(&[0x80])?; // Key frame
-  
+
   // Frame data
   writer.write_all(frame_data)?;
-  
+
   Ok(())
 }
 
 /// Write Matroska trailer
-fn write_matroska_trailer<W: std::io::Write>(
-  writer: &mut W
-) -> Result<(), napi::Error> {
+fn write_matroska_trailer<W: std::io::Write>(writer: &mut W) -> Result<(), napi::Error> {
   // Void element to pad
   writer.write_all(&[0xEC])?;
   writer.write_all(&[0x01])?;
   writer.write_all(&[0x00])?;
   writer.flush()?;
-  
+
   Ok(())
 }
 
@@ -1026,18 +1128,18 @@ fn write_y4m_header<W: std::io::Write>(
   writer: &mut W,
   width: i32,
   height: i32,
-  frame_rate: f64
+  frame_rate: f64,
 ) -> Result<(), napi::Error> {
   let fps_num = frame_rate as u32;
   let fps_den = 1u32;
-  
+
   let header = format!(
     "YUV4MPEG2 W{} H{} F{}:{} Ip A1:1 C420mpeg2\n",
     width, height, fps_num, fps_den
   );
-  
+
   writer.write_all(header.as_bytes())?;
-  
+
   Ok(())
 }
 
@@ -1045,11 +1147,11 @@ fn write_y4m_header<W: std::io::Write>(
 fn write_y4m_frame<W: std::io::Write>(
   writer: &mut W,
   frame_data: &[u8],
-  _frame_number: u32
+  _frame_number: u32,
 ) -> Result<(), napi::Error> {
   writer.write_all(b"FRAME\n")?;
   writer.write_all(frame_data)?;
-  
+
   Ok(())
 }
 
@@ -1058,46 +1160,50 @@ fn parse_y4m_header(header: &str) -> Result<(i32, i32, f64), napi::Error> {
   let mut width = 640;
   let mut height = 480;
   let mut frame_rate = 30.0;
-  
+
   for part in header.split_whitespace() {
     if let Some(rest) = part.strip_prefix("W") {
-      width = rest.parse::<i32>()
+      width = rest
+        .parse::<i32>()
         .map_err(|e| napi::Error::from_reason(format!("Invalid width: {}", e)))?;
     } else if let Some(rest) = part.strip_prefix("H") {
-      height = rest.parse::<i32>()
+      height = rest
+        .parse::<i32>()
         .map_err(|e| napi::Error::from_reason(format!("Invalid height: {}", e)))?;
     } else if let Some(rest) = part.strip_prefix("F") {
       let parts: Vec<&str> = rest.split(':').collect();
       if parts.len() == 2 {
-        let num: f64 = parts[0].parse()
+        let num: f64 = parts[0]
+          .parse()
           .map_err(|e| napi::Error::from_reason(format!("Invalid frame rate numerator: {}", e)))?;
-        let den: f64 = parts[1].parse()
-          .map_err(|e| napi::Error::from_reason(format!("Invalid frame rate denominator: {}", e)))?;
+        let den: f64 = parts[1].parse().map_err(|e| {
+          napi::Error::from_reason(format!("Invalid frame rate denominator: {}", e))
+        })?;
         frame_rate = num / den;
       }
     }
   }
-  
+
   Ok((width, height, frame_rate))
 }
 
 /// Parse Matroska frames (simplified)
 fn parse_matroska_frames(data: &[u8]) -> Result<Vec<Vec<u8>>, napi::Error> {
   let mut frames = Vec::new();
-  
+
   // Skip EBML header
   let mut offset = if data.len() > 4 && &data[0..4] == b"\x1a\x45\xdf\xa3" {
     4
   } else {
     0
   };
-  
+
   // Simple parsing - look for frame data patterns
   while offset < data.len() {
     // Look for SimpleBlock element (0xA3)
     if data[offset] == 0xA3 {
       offset += 1;
-      
+
       // Read size
       let size = if offset < data.len() {
         let first_byte = data[offset];
@@ -1112,10 +1218,10 @@ fn parse_matroska_frames(data: &[u8]) -> Result<Vec<Vec<u8>>, napi::Error> {
       } else {
         break;
       };
-      
+
       // Skip track number and timestamp (simplified)
       offset += 4;
-      
+
       // Read frame data
       let frame_size = size.saturating_sub(4);
       if offset + frame_size <= data.len() {
@@ -1128,7 +1234,7 @@ fn parse_matroska_frames(data: &[u8]) -> Result<Vec<Vec<u8>>, napi::Error> {
       offset += 1;
     }
   }
-  
+
   Ok(frames)
 }
 
@@ -1137,7 +1243,7 @@ fn apply_video_filter(frame_data: &[u8], filter_string: &str) -> Result<Vec<u8>,
   let mut filter_parts = filter_string.split('=');
   let filter_name = filter_parts.next().unwrap_or("").to_lowercase();
   let filter_params = filter_parts.next().map(|s| s.to_string());
-  
+
   match filter_name.as_str() {
     "scale" | "resize" => {
       // Parse scale parameters (e.g., "scale=640:480")
@@ -1160,7 +1266,7 @@ fn apply_video_filter(frame_data: &[u8], filter_string: &str) -> Result<Vec<u8>,
             parts[0].parse::<i32>(),
             parts[1].parse::<i32>(),
             parts[2].parse::<i32>(),
-            parts[3].parse::<i32>()
+            parts[3].parse::<i32>(),
           ) {
             return apply_crop_filter(frame_data, w, h, x, y);
           }
@@ -1202,28 +1308,32 @@ fn apply_video_filter(frame_data: &[u8], filter_string: &str) -> Result<Vec<u8>,
 }
 
 /// Apply scale filter to frame data
-fn apply_scale_filter(frame_data: &[u8], target_width: i32, target_height: i32) -> Result<Vec<u8>, napi::Error> {
+fn apply_scale_filter(
+  frame_data: &[u8],
+  target_width: i32,
+  target_height: i32,
+) -> Result<Vec<u8>, napi::Error> {
   // For YUV420 data, calculate original dimensions
   let data_len = frame_data.len();
   if data_len < 1 {
     return Ok(frame_data.to_vec());
   }
-  
+
   // Estimate original dimensions (assuming YUV420)
   let original_pixels = (data_len as i32) * 2 / 3;
-  
+
   let target_pixels = target_width * target_height;
   let scale_ratio = target_pixels as f64 / original_pixels as f64;
-  
+
   // Simple scaling by subsampling or upsampling
   let mut scaled_data = Vec::with_capacity((target_pixels as usize) * 3 / 2);
-  
+
   if scale_ratio < 1.0 {
     // Downsample: skip pixels
     let step = (1.0 / scale_ratio) as usize;
     let y_size = target_width as usize * target_height as usize;
     let uv_size = y_size / 4;
-    
+
     // Y plane
     for i in (0..y_size).step_by(step) {
       scaled_data.push(frame_data[i]);
@@ -1232,7 +1342,7 @@ fn apply_scale_filter(frame_data: &[u8], target_width: i32, target_height: i32) 
     while scaled_data.len() < y_size {
       scaled_data.push(*scaled_data.last().unwrap_or(&128));
     }
-    
+
     // UV planes
     for i in (y_size..y_size + uv_size).step_by(step) {
       scaled_data.push(frame_data[i]);
@@ -1245,7 +1355,7 @@ fn apply_scale_filter(frame_data: &[u8], target_width: i32, target_height: i32) 
     let repeat = scale_ratio as usize;
     let y_size = target_width as usize * target_height as usize;
     let uv_size = y_size / 4;
-    
+
     for &byte in &frame_data[..std::cmp::min(frame_data.len(), y_size)] {
       for _ in 0..repeat {
         scaled_data.push(byte);
@@ -1254,7 +1364,7 @@ fn apply_scale_filter(frame_data: &[u8], target_width: i32, target_height: i32) 
     while scaled_data.len() < y_size {
       scaled_data.push(*scaled_data.last().unwrap_or(&128));
     }
-    
+
     let uv_start = std::cmp::min(y_size, frame_data.len());
     for &byte in &frame_data[uv_start..std::cmp::min(frame_data.len(), uv_start + uv_size)] {
       for _ in 0..repeat {
@@ -1265,33 +1375,41 @@ fn apply_scale_filter(frame_data: &[u8], target_width: i32, target_height: i32) 
       scaled_data.push(*scaled_data.last().unwrap_or(&128));
     }
   }
-  
+
   Ok(scaled_data)
 }
 
 /// Apply crop filter to frame data
-fn apply_crop_filter(frame_data: &[u8], crop_w: i32, crop_h: i32, crop_x: i32, crop_y: i32) -> Result<Vec<u8>, napi::Error> {
+fn apply_crop_filter(
+  frame_data: &[u8],
+  crop_w: i32,
+  crop_h: i32,
+  crop_x: i32,
+  crop_y: i32,
+) -> Result<Vec<u8>, napi::Error> {
   let data_len = frame_data.len();
   if data_len < 1 {
     return Ok(frame_data.to_vec());
   }
-  
+
   // Estimate original dimensions
   let original_pixels = (data_len as i32) * 2 / 3;
   let original_width = (original_pixels as f64).sqrt() as i32;
   let original_height = original_pixels / original_width;
-  
+
   // Validate crop parameters
   if crop_x + crop_w > original_width || crop_y + crop_h > original_height {
-    return Err(napi::Error::from_reason("Crop parameters exceed frame dimensions"));
+    return Err(napi::Error::from_reason(
+      "Crop parameters exceed frame dimensions",
+    ));
   }
-  
+
   let crop_pixels = crop_w * crop_h;
   let cropped_y_size = crop_pixels as usize;
   let cropped_uv_size = cropped_y_size / 4;
   let total_cropped_size = cropped_y_size + 2 * cropped_uv_size;
   let mut cropped_data = Vec::with_capacity(total_cropped_size);
-  
+
   // Crop Y plane
   for y in crop_y as usize..(crop_y + crop_h) as usize {
     let row_start = y * original_width as usize + crop_x as usize;
@@ -1300,16 +1418,16 @@ fn apply_crop_filter(frame_data: &[u8], crop_w: i32, crop_h: i32, crop_x: i32, c
       cropped_data.extend_from_slice(&frame_data[row_start..row_end]);
     }
   }
-  
+
   // Crop UV planes (subsampled)
   let uv_width = original_width / 2;
   let uv_crop_x = crop_x / 2;
   let uv_crop_y = crop_y / 2;
   let uv_crop_w = crop_w / 2;
   let uv_crop_h = crop_h / 2;
-  
+
   let y_plane_size = original_width as usize * original_height as usize;
-  
+
   for uv_plane in 0..2 {
     let uv_plane_start = y_plane_size + uv_plane * (y_plane_size / 4);
     for y in uv_crop_y as usize..(uv_crop_y + uv_crop_h) as usize {
@@ -1320,7 +1438,7 @@ fn apply_crop_filter(frame_data: &[u8], crop_w: i32, crop_h: i32, crop_x: i32, c
       }
     }
   }
-  
+
   Ok(cropped_data)
 }
 
@@ -1330,17 +1448,17 @@ fn apply_hflip_filter(frame_data: &[u8]) -> Result<Vec<u8>, napi::Error> {
   if data_len < 1 {
     return Ok(frame_data.to_vec());
   }
-  
+
   // Estimate dimensions
   let original_pixels = (data_len as i32) * 2 / 3;
   let original_width = (original_pixels as f64).sqrt() as i32;
   let original_height = original_pixels / original_width;
-  
+
   let y_plane_size = original_width as usize * original_height as usize;
   let uv_plane_size = y_plane_size / 4;
-  
+
   let mut flipped_data = Vec::with_capacity(data_len);
-  
+
   // Flip Y plane row by row
   for y in 0..original_height as usize {
     let row_start = y * original_width as usize;
@@ -1350,11 +1468,11 @@ fn apply_hflip_filter(frame_data: &[u8]) -> Result<Vec<u8>, napi::Error> {
       flipped_data.extend(row.iter().rev());
     }
   }
-  
+
   // Flip UV planes
   let uv_width = original_width / 2;
   let uv_height = original_height / 2;
-  
+
   for uv_plane in 0..2 {
     let uv_plane_start = y_plane_size + uv_plane * uv_plane_size;
     for y in 0..uv_height as usize {
@@ -1366,7 +1484,7 @@ fn apply_hflip_filter(frame_data: &[u8]) -> Result<Vec<u8>, napi::Error> {
       }
     }
   }
-  
+
   Ok(flipped_data)
 }
 
@@ -1376,17 +1494,17 @@ fn apply_vflip_filter(frame_data: &[u8]) -> Result<Vec<u8>, napi::Error> {
   if data_len < 1 {
     return Ok(frame_data.to_vec());
   }
-  
+
   // Estimate dimensions
   let original_pixels = (data_len as i32) * 2 / 3;
   let original_width = (original_pixels as f64).sqrt() as i32;
   let original_height = original_pixels / original_width;
-  
+
   let y_plane_size = original_width as usize * original_height as usize;
   let uv_plane_size = y_plane_size / 4;
-  
+
   let mut flipped_data = Vec::with_capacity(data_len);
-  
+
   // Flip Y plane
   for y in (0..original_height as usize).rev() {
     let row_start = y * original_width as usize;
@@ -1395,11 +1513,11 @@ fn apply_vflip_filter(frame_data: &[u8]) -> Result<Vec<u8>, napi::Error> {
       flipped_data.extend_from_slice(&frame_data[row_start..row_end]);
     }
   }
-  
+
   // Flip UV planes
   let uv_width = original_width / 2;
   let uv_height = original_height / 2;
-  
+
   for uv_plane in 0..2 {
     let uv_plane_start = y_plane_size + uv_plane * uv_plane_size;
     for y in (0..uv_height as usize).rev() {
@@ -1410,19 +1528,19 @@ fn apply_vflip_filter(frame_data: &[u8]) -> Result<Vec<u8>, napi::Error> {
       }
     }
   }
-  
+
   Ok(flipped_data)
 }
 
 /// Apply brightness filter
 fn apply_brightness_filter(frame_data: &[u8], adjustment: i32) -> Result<Vec<u8>, napi::Error> {
   let mut adjusted_data = Vec::with_capacity(frame_data.len());
-  
+
   for &byte in frame_data {
     let adjusted = (byte as i32 + adjustment).clamp(0, 255) as u8;
     adjusted_data.push(adjusted);
   }
-  
+
   Ok(adjusted_data)
 }
 
@@ -1430,36 +1548,41 @@ fn apply_brightness_filter(frame_data: &[u8], adjustment: i32) -> Result<Vec<u8>
 fn apply_contrast_filter(frame_data: &[u8], contrast: f32) -> Result<Vec<u8>, napi::Error> {
   let mut adjusted_data = Vec::with_capacity(frame_data.len());
   let factor = (259.0 * (contrast + 255.0)) / (255.0 * (259.0 - contrast));
-  
+
   for &byte in frame_data {
     let adjusted = (factor * (byte as f32 - 128.0) + 128.0).clamp(0.0, 255.0) as u8;
     adjusted_data.push(adjusted);
   }
-  
+
   Ok(adjusted_data)
 }
 
 /// Encode YUV to IVF frame with actual compression
-fn encode_yuv_to_ivf_frame(yuv_data: &[u8], _width: i32, _height: i32) -> Result<Vec<u8>, napi::Error> {
+fn encode_yuv_to_ivf_frame(
+  yuv_data: &[u8],
+  _width: i32,
+  _height: i32,
+) -> Result<Vec<u8>, napi::Error> {
   // For now, use YUV data directly as a simple compression
   // In a full implementation, this would use av-encoders to encode with AV1/VP9/etc.
   // The YUV420 format is already a compressed representation compared to RGB
-  
+
   // Apply basic compression: run-length encoding for repeated values
   let mut compressed = Vec::with_capacity(yuv_data.len());
   let mut i = 0;
-  
+
   while i < yuv_data.len() {
     let current = yuv_data[i];
     let mut count = 1u8;
-    
+
     // Count consecutive same values
-    while i + (count as usize) < yuv_data.len() 
-      && yuv_data[i + (count as usize)] == current 
-      && count < 255 {
+    while i + (count as usize) < yuv_data.len()
+      && yuv_data[i + (count as usize)] == current
+      && count < 255
+    {
       count += 1;
     }
-    
+
     // If we have repeats, use run-length encoding
     if count > 3 {
       compressed.push(0xFF); // RLE marker
@@ -1471,7 +1594,7 @@ fn encode_yuv_to_ivf_frame(yuv_data: &[u8], _width: i32, _height: i32) -> Result
       i += 1;
     }
   }
-  
+
   // Only use compression if it's actually smaller
   if compressed.len() < yuv_data.len() {
     Ok(compressed)
@@ -1481,23 +1604,27 @@ fn encode_yuv_to_ivf_frame(yuv_data: &[u8], _width: i32, _height: i32) -> Result
 }
 
 /// Decode IVF frame to YUV with actual decompression
-fn decode_ivf_frame_to_yuv(frame_data: &[u8], _width: i32, _height: i32) -> Result<Vec<u8>, napi::Error> {
+fn decode_ivf_frame_to_yuv(
+  frame_data: &[u8],
+  _width: i32,
+  _height: i32,
+) -> Result<Vec<u8>, napi::Error> {
   // Check if this is RLE-compressed data
   if !frame_data.is_empty() && frame_data[0] == 0xFF {
     // Decompress run-length encoded data
     let mut decompressed = Vec::new();
     let mut i = 0;
-    
+
     while i + 2 < frame_data.len() {
       if frame_data[i] == 0xFF {
         // RLE encoded sequence
         let count = frame_data[i + 1] as usize;
         let value = frame_data[i + 2];
-        
+
         for _ in 0..count {
           decompressed.push(value);
         }
-        
+
         i += 3;
       } else {
         // Raw byte
@@ -1505,13 +1632,13 @@ fn decode_ivf_frame_to_yuv(frame_data: &[u8], _width: i32, _height: i32) -> Resu
         i += 1;
       }
     }
-    
+
     // Copy remaining bytes
     while i < frame_data.len() {
       decompressed.push(frame_data[i]);
       i += 1;
     }
-    
+
     Ok(decompressed)
   } else {
     // Not compressed, return as-is
