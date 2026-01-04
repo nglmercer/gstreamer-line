@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebSocket Video Stream</title>
+</head>
+<body>
+  <img id="image" alt="Video stream">
+  <script>
+    const image = document.getElementById('image');
+    const ws = new WebSocket('ws://localhost:8080/ws');
+
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+    };
+
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === 'frame') {
+        image.src = 'data:image/jpeg;base64,' + message.data;
+      }
+    };
+  </script>
+</body>
+</html>
