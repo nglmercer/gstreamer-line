@@ -1,7 +1,7 @@
 /**
  * Bun tests for Rust-AV Kit NAPI bindings
  */
-
+import { test,describe,expect,beforeAll,afterAll } from 'bun:test';
 import { 
   getSupportedFormats,
   getSupportedCodecs,

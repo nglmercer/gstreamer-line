@@ -88,12 +88,9 @@ pub fn validate_media_file(path: String) -> MediaProcessingResult {
     }
     
     let processor = create_processor();
-    let format = processor.detect_format(&path_buf);
+    let format = processor.detect_format(path_buf);
     
-    let format_name = match &format {
-        Some(ref fmt) => Some(format_name(fmt).to_string()),
-        None => None,
-    };
+    let format_name = format.as_ref().map(|fmt| format_name(fmt).to_string());
     
     MediaProcessingResult {
         success: format.is_some(),
@@ -112,9 +109,9 @@ pub fn get_media_summary(path: String) -> String {
     let path_buf = Path::new(&path);
     let processor = create_processor();
     
-    let format = processor.detect_format(&path_buf);
-    let format_str = match format {
-        Some(fmt) => format_long_name(&fmt),
+    let format = processor.detect_format(path_buf);
+    let format_str = match format.as_ref() {
+        Some(fmt) => format_long_name(fmt),
         None => "Unknown format".to_string(),
     };
     
@@ -136,10 +133,10 @@ mod tests {
         let processor = create_processor();
         
         let ivf_path = Path::new("test.ivf");
-        assert_eq!(processor.detect_format(&ivf_path), Some(MediaFormat::Ivf));
+        assert_eq!(processor.detect_format(ivf_path), Some(MediaFormat::Ivf));
         
         let unknown_path = Path::new("test.unknown");
-        assert_eq!(processor.detect_format(&unknown_path), None);
+        assert_eq!(processor.detect_format(unknown_path), None);
     }
 
     #[test]

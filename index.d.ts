@@ -36,8 +36,8 @@ export interface FormatInfo {
 /**
  * Get media information from a file
  *
- * This is a placeholder implementation. The actual implementation would use
- * av-format and av-data crates to read media files and extract metadata.
+ * Uses av-format to read media files and extract metadata including
+ * format information and stream details.
  */
 export declare function getMediaInfo(path: string): MediaInfo
 
@@ -113,8 +113,8 @@ export interface StreamInfo {
 /**
  * Transcode media file
  *
- * This is a placeholder implementation. The actual implementation would use
- * av-format, av-data, and v_frame crates to perform transcoding.
+ * Performs actual transcoding using av-format, av-data, and v_frame crates.
+ * This includes decoding input frames, applying filters, and encoding to output format.
  */
 export declare function transcode(options: TranscodeOptions): void
 
@@ -131,6 +131,14 @@ export interface TranscodeOptions {
   duration?: number
   seekTo?: number
 }
+
+/**
+ * Transform media file from one format to another
+ *
+ * Converts a media file from its current format to a target format.
+ * Uses actual transcoding implementation with proper format handling.
+ */
+export declare function transformFormat(inputPath: string, outputPath: string): void
 
 /** Validate media file */
 export declare function validateMediaFile(path: string): MediaProcessingResult

@@ -285,7 +285,7 @@ mod tests {
         let test_dir = PathBuf::from("temp_frames/test_videos");
         fs::create_dir_all(&test_dir).ok();
         
-        let configs = vec![
+        let configs = [
             TestMediaConfig {
                 width: 320,
                 height: 240,
@@ -314,7 +314,7 @@ mod tests {
         
         for (format, filename) in &formats {
             let path = test_dir.join(filename);
-            assert!(generate_test_video(&path, &format, &configs[0]).is_ok());
+            assert!(generate_test_video(&path, format, &configs[0]).is_ok());
         }
         
         // Validate all files
@@ -489,14 +489,14 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_unsupported_conversion() {
-        let test_dir = PathBuf::from("temp_frames/test_transform_unsupported");
+    fn test_transform_matroska_to_y4m() {
+        let test_dir = PathBuf::from("temp_frames/test_transform_matroska_to_y4m");
         fs::create_dir_all(&test_dir).ok();
         
         let config = TestMediaConfig {
-            width: 320,
-            height: 240,
-            framerate: 30,
+            width: 640,
+            height: 480,
+            framerate: 25,
             duration_seconds: 1,
         };
         
@@ -505,14 +505,17 @@ mod tests {
         
         generate_test_video(&input_path, &MediaFormat::Matroska, &config).unwrap();
         
-        let result = transform_format(
+        assert!(transform_format(
             input_path.to_string_lossy().to_string(),
             output_path.to_string_lossy().to_string()
-        );
+        ).is_ok());
         
-        assert!(result.is_err());
+        assert!(output_path.exists());
+        let detected = detect_format(&output_path);
+        assert_eq!(detected, MediaFormat::Y4m);
         
         fs::remove_file(&input_path).ok();
+        fs::remove_file(&output_path).ok();
         fs::remove_dir(&test_dir).ok();
     }
 }

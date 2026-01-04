@@ -55,28 +55,28 @@ mod tests {
     #[test]
     fn test_detect_ivf_format() {
         let path = Path::new("test.ivf");
-        assert_eq!(detect_format(&path), MediaFormat::Ivf);
+        assert_eq!(detect_format(path), MediaFormat::Ivf);
     }
 
     #[test]
     fn test_detect_matroska_format() {
         let path = Path::new("test.mkv");
-        assert_eq!(detect_format(&path), MediaFormat::Matroska);
+        assert_eq!(detect_format(path), MediaFormat::Matroska);
         
         let path = Path::new("test.webm");
-        assert_eq!(detect_format(&path), MediaFormat::Matroska);
+        assert_eq!(detect_format(path), MediaFormat::Matroska);
     }
 
     #[test]
     fn test_detect_y4m_format() {
         let path = Path::new("test.y4m");
-        assert_eq!(detect_format(&path), MediaFormat::Y4m);
+        assert_eq!(detect_format(path), MediaFormat::Y4m);
     }
 
     #[test]
     fn test_detect_unknown_format() {
         let path = Path::new("test.mp4");
-        assert!(matches!(detect_format(&path), MediaFormat::Unknown(_)));
+        assert!(matches!(detect_format(path), MediaFormat::Unknown(_)));
     }
 
     #[test]

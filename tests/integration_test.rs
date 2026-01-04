@@ -13,6 +13,7 @@ mod integration_tests {
   };
 
   // Helper function to create a test directory
+  #[allow(dead_code)]
   fn setup_test_dir() -> PathBuf {
     let test_dir = PathBuf::from("temp_frames/test_output");
     fs::create_dir_all(&test_dir).unwrap();
@@ -20,6 +21,7 @@ mod integration_tests {
   }
 
   // Helper function to clean up test directory
+  #[allow(dead_code)]
   fn cleanup_test_dir(test_dir: PathBuf) {
     if test_dir.exists() {
       fs::remove_dir_all(&test_dir).unwrap();
