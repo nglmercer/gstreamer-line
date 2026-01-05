@@ -26,15 +26,7 @@ pub fn detect_codec_from_data(
     MediaFormat::Ivf => detect_ivf_codec(data),
     MediaFormat::Matroska => detect_matroska_codec(data, path),
     MediaFormat::Y4m => detect_y4m_codec(data),
-    MediaFormat::Unknown(_) => (
-      String::new(),
-      String::new(),
-      None,
-      None,
-      None,
-      None,
-      None,
-    ),
+    MediaFormat::Unknown(_) => (String::new(), String::new(), None, None, None, None, None),
   }
 }
 

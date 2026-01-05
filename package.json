@@ -55,7 +55,10 @@
     "prepublishOnly": "napi prepublish -t npm",
     "test": "bun test",
     "preversion": "napi build --platform && git add .",
-    "version": "napi version"
+    "version": "napi version",
+    "videos:fetch": "bun run examples/fetch_test_videos.ts fetch",
+    "videos:clean": "bun run examples/fetch_test_videos.ts clean",
+    "videos:list": "bun run examples/fetch_test_videos.ts list"
   },
   "devDependencies": {
     "@emnapi/core": "^1.5.0",

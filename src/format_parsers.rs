@@ -25,9 +25,9 @@ pub fn parse_y4m_header(header: &str) -> Result<(i32, i32, f64), Error> {
         let num: f64 = parts[0]
           .parse()
           .map_err(|e| Error::from_reason(format!("Invalid frame rate numerator: {}", e)))?;
-        let den: f64 = parts[1].parse().map_err(|e| {
-          Error::from_reason(format!("Invalid frame rate denominator: {}", e))
-        })?;
+        let den: f64 = parts[1]
+          .parse()
+          .map_err(|e| Error::from_reason(format!("Invalid frame rate denominator: {}", e)))?;
         frame_rate = num / den;
       }
     }

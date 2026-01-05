@@ -584,4 +584,5 @@ module.exports.getSupportedPixelFormats = nativeBinding.getSupportedPixelFormats
 module.exports.getSupportedSampleFormats = nativeBinding.getSupportedSampleFormats
 module.exports.transcode = nativeBinding.transcode
 module.exports.transformFormat = nativeBinding.transformFormat
+module.exports.validateFile = nativeBinding.validateFile
 module.exports.validateMediaFile = nativeBinding.validateMediaFile

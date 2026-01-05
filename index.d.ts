@@ -140,5 +140,21 @@ export interface TranscodeOptions {
  */
 export declare function transformFormat(inputPath: string, outputPath: string): void
 
+/** Validate a media file and return validation result */
+export declare function validateFile(filePath: string): ValidationResult
+
 /** Validate media file */
 export declare function validateMediaFile(path: string): MediaProcessingResult
+
+/** Validation result for a media file */
+export interface ValidationResult {
+  isValid: boolean
+  format: string
+  duration?: number
+  width?: number
+  height?: number
+  codec?: string
+  frameCount?: number
+  errors: Array<string>
+  warnings: Array<string>
+}

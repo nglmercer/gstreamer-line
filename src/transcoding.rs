@@ -5,9 +5,8 @@
 use crate::encoding::{decode_ivf_frame_to_yuv, encode_yuv_to_ivf_frame};
 use crate::format_parsers::{parse_matroska_frames, parse_y4m_header};
 use crate::format_writers::{
-  write_ivf_frame, write_ivf_header, write_matroska_header,
-  write_matroska_simpleblock, write_matroska_trailer, write_y4m_frame,
-  write_y4m_header,
+  write_ivf_frame, write_ivf_header, write_matroska_header, write_matroska_simpleblock,
+  write_matroska_trailer, write_y4m_frame, write_y4m_header,
 };
 use crate::types::TranscodeOptions;
 use crate::video_filters::apply_video_filter;

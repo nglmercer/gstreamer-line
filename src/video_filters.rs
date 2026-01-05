@@ -165,7 +165,9 @@ fn apply_crop_filter(
 
   // Validate crop parameters
   if crop_x + crop_w > original_width || crop_y + crop_h > original_height {
-    return Err(Error::from_reason("Crop parameters exceed frame dimensions"));
+    return Err(Error::from_reason(
+      "Crop parameters exceed frame dimensions",
+    ));
   }
 
   let crop_pixels = crop_w * crop_h;

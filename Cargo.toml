@@ -13,11 +13,25 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 napi        = "3.0.0"
 napi-derive = "3.0.0"
+# Core rust-av crates
+av-codec = "0.2"
 av-data = "0.4"
 av-format = "0.7"
 v_frame = "0.3"
+# Matroska/WebM support from rust-av
+matroska = { version = "0.1.0", git = "https://github.com/rust-av/matroska", optional = true }
+# Codec support (optional - requires system libraries)
+av-vorbis = { git = "https://github.com/rust-av/av-vorbis", optional = true }
+libopus = { version = "0.1.0", git = "https://github.com/rust-av/opus-rs", features = ["codec-trait"], optional = true }
+libvpx = { version = "0.1.0", git = "https://github.com/rust-av/vpx-rs", features = ["codec-trait"], optional = true }
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[features]
+default = []
+full-codecs = ["matroska", "av-vorbis", "libopus", "libvpx"]
+matroska-support = ["matroska"]
 
 [build-dependencies]
 napi-build = "2"

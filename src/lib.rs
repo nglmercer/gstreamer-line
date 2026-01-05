@@ -8,12 +8,16 @@ pub mod format_writers;
 pub mod media;
 pub mod transcoding;
 pub mod types;
+pub mod validation;
 pub mod video_filters;
 
 pub use codec::*;
 pub use format::*;
 pub use media::*;
 pub use types::*;
+
+// Explicit re-exports to avoid ambiguity
+pub use validation::{validate_file, ValidationResult, validate_media_file};
 
 use codec_detection::{detect_codec_from_data, estimate_duration};
 use napi_derive::napi;
