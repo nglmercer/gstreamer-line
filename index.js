@@ -576,12 +576,16 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.extractFramesAsRgba = nativeBinding.extractFramesAsRgba
+module.exports.extractFramesToImages = nativeBinding.extractFramesToImages
+module.exports.extractFramesWithVFrame = nativeBinding.extractFramesWithVFrame
 module.exports.getMediaInfo = nativeBinding.getMediaInfo
 module.exports.getMediaSummary = nativeBinding.getMediaSummary
 module.exports.getSupportedCodecs = nativeBinding.getSupportedCodecs
 module.exports.getSupportedFormats = nativeBinding.getSupportedFormats
 module.exports.getSupportedPixelFormats = nativeBinding.getSupportedPixelFormats
 module.exports.getSupportedSampleFormats = nativeBinding.getSupportedSampleFormats
+module.exports.saveFramesAsImages = nativeBinding.saveFramesAsImages
 module.exports.transcode = nativeBinding.transcode
 module.exports.transformFormat = nativeBinding.transformFormat
 module.exports.validateFile = nativeBinding.validateFile

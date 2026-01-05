@@ -137,3 +137,4 @@ temp_frames/*
 examples/**/*.y4m
 examples/**/*.ivf
 examples/**/*.mkv
+examples/test_files/*

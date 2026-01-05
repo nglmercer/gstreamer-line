@@ -66,7 +66,7 @@ pub fn write_matroska_header<W: Write>(
   // Segment Information (0x1549a966)
   writer.write_all(&[0x15, 0x49, 0xa9, 0x66])?;
   writer.write_all(&[0x8d])?; // Size (29 bytes)
-  
+
   // TimecodeScale (0x2ad7b1)
   writer.write_all(&[0x2a, 0xd7, 0xb1])?;
   writer.write_all(&[0x83])?;
@@ -185,7 +185,7 @@ pub fn write_matroska_cluster_start<W: Write>(
   writer.write_all(&[0x1F, 0x43, 0xB6, 0x75])?;
   // Unknown size (will be updated later if needed)
   writer.write_all(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])?;
-  
+
   // Timecode (0xE7)
   writer.write_all(&[0xE7])?;
   writer.write_all(&[0x83])?;

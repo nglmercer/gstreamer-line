@@ -4,11 +4,453 @@
 //! using the rust-av ecosystem.
 
 use crate::types::TranscodeOptions;
+use image::{RgbImage, RgbaImage};
 use napi::Error;
-use std::path::PathBuf;
+use napi_derive::napi;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
+use std::path::PathBuf;
+
+/// Extract frames as RGBA buffers
+#[napi(object)]
+pub struct FrameData {
+  pub frame_number: u32,
+  pub width: u32,
+  pub height: u32,
+  pub rgba_data: Vec<u8>,
+}
+
+/// Extract frames from video file as RGBA buffers
+#[napi]
+pub fn extract_frames_as_rgba(
+  input_path: String,
+  max_frames: Option<u32>,
+) -> Result<Vec<FrameData>, Error> {
+  let path_buf = PathBuf::from(&input_path);
+
+  if !path_buf.exists() {
+    return Err(Error::from_reason(format!(
+      "Input file not found: {}",
+      path_buf.display()
+    )));
+  }
+
+  let input_data = std::fs::read(&path_buf)
+    .map_err(|e| Error::from_reason(format!("Failed to read input file: {}", e)))?;
+
+  let format = crate::format::detect_format(&path_buf);
+
+  match format {
+    crate::format::MediaFormat::Y4m => {
+      extract_y4m_frames_as_rgba(&input_data, max_frames.unwrap_or(u32::MAX))
+    }
+    crate::format::MediaFormat::Ivf => {
+      extract_ivf_frames_as_rgba(&input_data, max_frames.unwrap_or(u32::MAX))
+    }
+    _ => Err(Error::from_reason(format!(
+      "Unsupported format for frame extraction: {:?}",
+      format
+    ))),
+  }
+}
+
+/// Extract frames from Y4M file as RGBA
+fn extract_y4m_frames_as_rgba(data: &[u8], max_frames: u32) -> Result<Vec<FrameData>, Error> {
+  // Parse Y4M header
+  let header_end = data
+    .iter()
+    .position(|&b| b == b'\n')
+    .ok_or_else(|| Error::from_reason("Invalid Y4M file: no header found"))?;
+
+  let header = std::str::from_utf8(&data[..header_end])
+    .map_err(|e| Error::from_reason(format!("Invalid Y4M header: {}", e)))?;
+
+  let (width, height, _frame_rate) = parse_y4m_header(header)?;
+
+  let mut frames = Vec::new();
+  let mut offset = header_end + 1;
+  let mut frame_count = 0u32;
+
+  let y_size = width as usize * height as usize;
+  let uv_size = y_size / 4;
+  let frame_size = y_size + 2 * uv_size;
+
+  while offset < data.len() && frame_count < max_frames {
+    // Look for FRAME marker
+    if offset + 5 <= data.len() && &data[offset..offset + 5] == b"FRAME" {
+      offset += 5;
+
+      // Skip to newline
+      while offset < data.len() && data[offset] != b'\n' {
+        offset += 1;
+      }
+      if offset < data.len() {
+        offset += 1;
+      }
+
+      if offset + frame_size > data.len() {
+        break;
+      }
+
+      let yuv_data = &data[offset..offset + frame_size];
+
+      // Convert YUV420 to RGBA
+      let rgba_data = yuv420_to_rgba(yuv_data, width as usize, height as usize);
+
+      frames.push(FrameData {
+        frame_number: frame_count,
+        width: width as u32,
+        height: height as u32,
+        rgba_data,
+      });
+
+      offset += frame_size;
+      frame_count += 1;
+    } else {
+      offset += 1;
+    }
+  }
+
+  Ok(frames)
+}
+
+/// Extract frames from IVF file as RGBA
+fn extract_ivf_frames_as_rgba(data: &[u8], max_frames: u32) -> Result<Vec<FrameData>, Error> {
+  // Parse IVF header
+  if data.len() < 32 {
+    return Err(Error::from_reason("Invalid IVF file: header too short"));
+  }
+
+  let width = u16::from_le_bytes([data[24], data[25]]) as usize;
+  let height = u16::from_le_bytes([data[26], data[27]]) as usize;
+
+  let mut frames = Vec::new();
+  let mut offset = 32; // Skip IVF header
+  let mut frame_count = 0u32;
+
+  while offset + 12 <= data.len() && frame_count < max_frames {
+    let frame_size_bytes = u32::from_le_bytes([
+      data[offset],
+      data[offset + 1],
+      data[offset + 2],
+      data[offset + 3],
+    ]) as usize;
+
+    if offset + 12 + frame_size_bytes > data.len() {
+      break;
+    }
+
+    let frame_data = &data[offset + 12..offset + 12 + frame_size_bytes];
+
+    // Assuming IVF contains YUV420 data
+    let rgba_data = yuv420_to_rgba(frame_data, width, height);
+
+    frames.push(FrameData {
+      frame_number: frame_count,
+      width: width as u32,
+      height: height as u32,
+      rgba_data,
+    });
+
+    offset += 12 + frame_size_bytes;
+    frame_count += 1;
+  }
+
+  Ok(frames)
+}
+
+/// Convert YUV420 to RGBA
+fn yuv420_to_rgba(yuv_data: &[u8], width: usize, height: usize) -> Vec<u8> {
+  let y_size = width * height;
+  let uv_size = y_size / 4;
+
+  let y_plane = &yuv_data[0..y_size];
+  let u_plane = &yuv_data[y_size..y_size + uv_size];
+  let v_plane = &yuv_data[y_size + uv_size..y_size + 2 * uv_size];
+
+  let mut rgba = vec![0u8; width * height * 4];
+
+  for y in 0..height {
+    for x in 0..width {
+      let y_idx = y * width + x;
+      let uv_y = y / 2;
+      let uv_x = x / 2;
+      let uv_idx = uv_y * (width / 2) + uv_x;
+
+      let y_val = y_plane[y_idx] as f32;
+      let u_val = u_plane[uv_idx] as f32 - 128.0;
+      let v_val = v_plane[uv_idx] as f32 - 128.0;
+
+      // YUV to RGB conversion
+      let r = (y_val + 1.402 * v_val).clamp(0.0, 255.0) as u8;
+      let g = (y_val - 0.344 * u_val - 0.714 * v_val).clamp(0.0, 255.0) as u8;
+      let b = (y_val + 1.772 * u_val).clamp(0.0, 255.0) as u8;
+
+      let rgba_idx = y_idx * 4;
+      rgba[rgba_idx] = r;
+      rgba[rgba_idx + 1] = g;
+      rgba[rgba_idx + 2] = b;
+      rgba[rgba_idx + 3] = 255; // Alpha
+    }
+  }
+
+  rgba
+}
+
+/// Options for saving frames as images
+#[napi(object)]
+pub struct SaveFramesOptions {
+  /// Output directory for images
+  pub output_dir: String,
+  /// Image format (png, jpg, bmp, etc.)
+  pub image_format: Option<String>,
+  /// Prefix for image filenames
+  pub filename_prefix: Option<String>,
+  /// Number of digits for frame numbering (e.g., 4 = frame_0001.png)
+  pub frame_number_digits: Option<u32>,
+}
+
+/// Save frames as image files
+#[napi]
+pub fn save_frames_as_images(
+  frames: Vec<FrameData>,
+  options: SaveFramesOptions,
+) -> Result<Vec<String>, Error> {
+  let output_dir = PathBuf::from(&options.output_dir);
+
+  // Create output directory if it doesn't exist
+  std::fs::create_dir_all(&output_dir)
+    .map_err(|e| Error::from_reason(format!("Failed to create output directory: {}", e)))?;
+
+  let image_format = options
+    .image_format
+    .unwrap_or("png".to_string())
+    .to_lowercase();
+  let prefix = options.filename_prefix.unwrap_or("frame".to_string());
+  let num_digits = options.frame_number_digits.unwrap_or(4);
+
+  let mut saved_paths = Vec::new();
+
+  for frame in frames {
+    let filename = format!(
+      "{}_{:0width$}.{}",
+      prefix,
+      frame.frame_number,
+      image_format,
+      width = num_digits as usize
+    );
+
+    let filepath = output_dir.join(&filename);
+
+    // Convert RGBA data to image
+    let rgba_image: RgbaImage = RgbaImage::from_raw(frame.width, frame.height, frame.rgba_data)
+      .ok_or_else(|| Error::from_reason("Failed to create image from RGBA data"))?;
+
+    // Save image based on format
+    match image_format.as_str() {
+      "png" => {
+        rgba_image
+          .save(&filepath)
+          .map_err(|e| Error::from_reason(format!("Failed to save PNG: {}", e)))?;
+      }
+      "jpg" | "jpeg" => {
+        let rgb_image = RgbImage::from_raw(
+          frame.width,
+          frame.height,
+          rgba_image
+            .pixels()
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect::<Vec<u8>>(),
+        )
+        .ok_or_else(|| Error::from_reason("Failed to create RGB image"))?;
+
+        rgb_image
+          .save(&filepath)
+          .map_err(|e| Error::from_reason(format!("Failed to save JPEG: {}", e)))?;
+      }
+      "bmp" => {
+        rgba_image
+          .save(&filepath)
+          .map_err(|e| Error::from_reason(format!("Failed to save BMP: {}", e)))?;
+      }
+      _ => {
+        return Err(Error::from_reason(format!(
+          "Unsupported image format: {}. Supported formats: png, jpg, jpeg, bmp",
+          image_format
+        )));
+      }
+    }
+
+    saved_paths.push(filepath.to_string_lossy().to_string());
+  }
+
+  Ok(saved_paths)
+}
+
+/// Extract frames from video and save directly as images
+#[napi]
+pub fn extract_frames_to_images(
+  input_path: String,
+  output_dir: String,
+  max_frames: Option<u32>,
+  image_format: Option<String>,
+) -> Result<Vec<String>, Error> {
+  // Extract frames as RGBA
+  let frames = extract_frames_as_rgba(input_path, max_frames)?;
+
+  // Save frames as images
+  let saved_paths = save_frames_as_images(
+    frames,
+    SaveFramesOptions {
+      output_dir,
+      image_format,
+      filename_prefix: Some("frame".to_string()),
+      frame_number_digits: Some(4),
+    },
+  )?;
+
+  Ok(saved_paths)
+}
+
+/// Extract frames from video using v_frame
+#[napi]
+pub fn extract_frames_with_v_frame(
+  input_path: String,
+  max_frames: Option<u32>,
+) -> Result<Vec<FrameData>, Error> {
+  let path_buf = PathBuf::from(&input_path);
+
+  if !path_buf.exists() {
+    return Err(Error::from_reason(format!(
+      "Input file not found: {}",
+      path_buf.display()
+    )));
+  }
+
+  let input_data = std::fs::read(&path_buf)
+    .map_err(|e| Error::from_reason(format!("Failed to read input file: {}", e)))?;
+
+  let format = crate::format::detect_format(&path_buf);
+
+  match format {
+    crate::format::MediaFormat::Y4m => {
+      extract_y4m_frames_with_v_frame(&input_data, max_frames.unwrap_or(u32::MAX))
+    }
+    crate::format::MediaFormat::Ivf => {
+      extract_ivf_frames_with_v_frame(&input_data, max_frames.unwrap_or(u32::MAX))
+    }
+    _ => Err(Error::from_reason(format!(
+      "Unsupported format for frame extraction: {:?}",
+      format
+    ))),
+  }
+}
+
+/// Extract frames from Y4M using optimized parsing
+fn extract_y4m_frames_with_v_frame(data: &[u8], max_frames: u32) -> Result<Vec<FrameData>, Error> {
+  // Parse Y4M header
+  let header_end = data
+    .iter()
+    .position(|&b| b == b'\n')
+    .ok_or_else(|| Error::from_reason("Invalid Y4M file: no header found"))?;
+
+  let header = std::str::from_utf8(&data[..header_end])
+    .map_err(|e| Error::from_reason(format!("Invalid Y4M header: {}", e)))?;
+
+  let (width, height, _frame_rate) = parse_y4m_header(header)?;
+
+  let mut frames = Vec::new();
+  let mut offset = header_end + 1;
+  let mut frame_count = 0u32;
+
+  let y_size = width as usize * height as usize;
+  let uv_size = y_size / 4;
+  let frame_size = y_size + 2 * uv_size;
+
+  while offset < data.len() && frame_count < max_frames {
+    // Look for FRAME marker
+    if offset + 5 <= data.len() && &data[offset..offset + 5] == b"FRAME" {
+      offset += 5;
+
+      // Skip to newline
+      while offset < data.len() && data[offset] != b'\n' {
+        offset += 1;
+      }
+      if offset < data.len() {
+        offset += 1;
+      }
+
+      if offset + frame_size > data.len() {
+        break;
+      }
+
+      let yuv_data = &data[offset..offset + frame_size];
+
+      // Convert YUV420 to RGBA
+      let rgba_data = yuv420_to_rgba(yuv_data, width as usize, height as usize);
+
+      frames.push(FrameData {
+        frame_number: frame_count,
+        width: width as u32,
+        height: height as u32,
+        rgba_data,
+      });
+
+      offset += frame_size;
+      frame_count += 1;
+    } else {
+      offset += 1;
+    }
+  }
+
+  Ok(frames)
+}
+
+/// Extract frames from IVF using optimized parsing
+fn extract_ivf_frames_with_v_frame(data: &[u8], max_frames: u32) -> Result<Vec<FrameData>, Error> {
+  // Parse IVF header
+  if data.len() < 32 {
+    return Err(Error::from_reason("Invalid IVF file: header too short"));
+  }
+
+  let width = u16::from_le_bytes([data[24], data[25]]) as usize;
+  let height = u16::from_le_bytes([data[26], data[27]]) as usize;
+
+  let mut frames = Vec::new();
+  let mut offset = 32; // Skip IVF header
+  let mut frame_count = 0u32;
+
+  while offset + 12 <= data.len() && frame_count < max_frames {
+    let frame_size_bytes = u32::from_le_bytes([
+      data[offset],
+      data[offset + 1],
+      data[offset + 2],
+      data[offset + 3],
+    ]) as usize;
+
+    if offset + 12 + frame_size_bytes > data.len() {
+      break;
+    }
+
+    let frame_data = &data[offset + 12..offset + 12 + frame_size_bytes];
+
+    // Assuming IVF contains YUV420 data
+    let rgba_data = yuv420_to_rgba(frame_data, width, height);
+
+    frames.push(FrameData {
+      frame_number: frame_count,
+      width: width as u32,
+      height: height as u32,
+      rgba_data,
+    });
+
+    offset += 12 + frame_size_bytes;
+    frame_count += 1;
+  }
+
+  Ok(frames)
+}
 
 /// Transcode IVF to Matroska format
 pub fn transcode_ivf_to_matroska(
@@ -38,8 +480,10 @@ pub fn transcode_ivf_to_matroska(
   };
 
   // Create output file
-  let mut output = BufWriter::new(File::create(output_path)
-    .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?);
+  let mut output = BufWriter::new(
+    File::create(output_path)
+      .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?,
+  );
 
   // Write EBML header for WebM
   write_webm_header(&mut output, final_width, final_height, final_frame_rate)?;
@@ -83,7 +527,8 @@ pub fn transcode_ivf_to_matroska(
     frame_count += 1;
   }
 
-  output.flush()
+  output
+    .flush()
     .map_err(|e| Error::from_reason(format!("Failed to flush output: {}", e)))?;
 
   Ok(())
@@ -324,7 +769,8 @@ pub fn transcode_y4m_to_matroska(
     }
   }
 
-  output_file.flush()
+  output_file
+    .flush()
     .map_err(|e| Error::from_reason(format!("Failed to flush output: {}", e)))?;
 
   Ok(())
@@ -430,7 +876,7 @@ fn write_webm_header<W: Write>(
   // Segment Information (0x1549a966)
   writer.write_all(&[0x15, 0x49, 0xa9, 0x66])?;
   writer.write_all(&[0x8d])?; // Size (29 bytes)
-  
+
   // TimecodeScale (0x2ad7b1)
   writer.write_all(&[0x2a, 0xd7, 0xb1])?;
   writer.write_all(&[0x83])?;
@@ -507,15 +953,12 @@ fn write_webm_header<W: Write>(
   Ok(())
 }
 
-fn write_cluster_start<W: Write>(
-  writer: &mut W,
-  timestamp: u64,
-) -> Result<(), Error> {
+fn write_cluster_start<W: Write>(writer: &mut W, timestamp: u64) -> Result<(), Error> {
   // Cluster element ID (0x1F43B675)
   writer.write_all(&[0x1F, 0x43, 0xB6, 0x75])?;
   // Unknown size
   writer.write_all(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])?;
-  
+
   // Timecode (0xE7)
   writer.write_all(&[0xE7])?;
   writer.write_all(&[0x83])?;
@@ -592,12 +1035,12 @@ fn parse_y4m_header(header: &str) -> Result<(i32, i32, f64), Error> {
   let mut frame_rate = 30.0f64;
 
   for token in header.split_whitespace() {
-    if token.starts_with('W') {
-      width = token[1..].parse().unwrap_or(320);
-    } else if token.starts_with('H') {
-      height = token[1..].parse().unwrap_or(240);
-    } else if token.starts_with('F') {
-      let parts: Vec<&str> = token[1..].split(':').collect();
+    if let Some(stripped) = token.strip_prefix('W') {
+      width = stripped.parse().unwrap_or(320);
+    } else if let Some(stripped) = token.strip_prefix('H') {
+      height = stripped.parse().unwrap_or(240);
+    } else if let Some(stripped) = token.strip_prefix('F') {
+      let parts: Vec<&str> = stripped.split(':').collect();
       if parts.len() == 2 {
         let num: f64 = parts[0].parse().unwrap_or(30.0);
         let den: f64 = parts[1].parse().unwrap_or(1.0);
@@ -614,4 +1057,3 @@ fn parse_matroska_frames(_input_data: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
   // In a full implementation, this would use av-format to properly parse Matroska
   Ok(Vec::new())
 }
-

@@ -25,6 +25,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use transcoding::*;
 
+// Re-export frame extraction types and functions
+pub use transcoding::{
+  extract_frames_as_rgba, extract_frames_to_images, extract_frames_with_v_frame,
+  save_frames_as_images, FrameData, SaveFramesOptions,
+};
+
 // Initialize rust-av on module load
 static RUST_AV_INIT: Mutex<bool> = Mutex::new(false);
 

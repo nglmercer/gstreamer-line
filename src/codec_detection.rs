@@ -79,18 +79,129 @@ fn detect_matroska_codec(data: &[u8], path: &Path) -> CodecDetectionResult {
       "mkv" => ("h264", "video"),
       _ => ("unknown", "unknown"),
     };
+
+    // Parse EBML to extract width and height
+    let (width, height) = parse_matroska_dimensions(data);
+
     (
       codec_name.to_string(),
       codec_type.to_string(),
-      None,
-      None,
-      None,
+      width,
+      height,
+      Some(30.0), // Default frame rate
       None,
       None,
     )
   } else {
     (String::new(), String::new(), None, None, None, None, None)
   }
+}
+
+/// Parse width and height from Matroska/WebM EBML structure
+fn parse_matroska_dimensions(data: &[u8]) -> (Option<i32>, Option<i32>) {
+  let mut width: Option<i32> = None;
+  let mut height: Option<i32> = None;
+
+  // EBML element IDs we're looking for:
+  // 0xB0 = PixelWidth
+  // 0xBA = PixelHeight
+  // 0x54B0 = DisplayWidth
+  // 0x54BA = DisplayHeight
+
+  let mut i = 0;
+  while i < data.len().saturating_sub(10) {
+    // Check for PixelWidth (0xB0)
+    if data[i] == 0xB0 && i + 3 < data.len() {
+      // Element ID: 0xB0
+      // Size descriptor: data[i+1]
+      let size = match data[i + 1] {
+        0x81 => 1, // 1 byte size
+        0x82 => 2, // 2 byte size
+        _ => continue,
+      };
+
+      if i + 2 + size <= data.len() {
+        let value = match size {
+          1 => data[i + 2] as i32,
+          2 => u16::from_le_bytes([data[i + 2], data[i + 3]]) as i32,
+          _ => continue,
+        };
+        if value > 0 && value < 10000 {
+          width = Some(value);
+        }
+      }
+    }
+
+    // Check for PixelHeight (0xBA)
+    if data[i] == 0xBA && i + 3 < data.len() {
+      // Element ID: 0xBA
+      // Size descriptor: data[i+1]
+      let size = match data[i + 1] {
+        0x81 => 1, // 1 byte size
+        0x82 => 2, // 2 byte size
+        _ => continue,
+      };
+
+      if i + 2 + size <= data.len() {
+        let value = match size {
+          1 => data[i + 2] as i32,
+          2 => u16::from_le_bytes([data[i + 2], data[i + 3]]) as i32,
+          _ => continue,
+        };
+        if value > 0 && value < 10000 {
+          height = Some(value);
+        }
+      }
+    }
+
+    // Check for DisplayWidth (0x54B0)
+    if data[i] == 0x54 && i + 4 < data.len() && data[i + 1] == 0xB0 {
+      // Element ID: 0x54B0
+      // Size descriptor: data[i+2]
+      let size = match data[i + 2] {
+        0x81 => 1, // 1 byte size
+        0x82 => 2, // 2 byte size
+        _ => continue,
+      };
+
+      if i + 3 + size <= data.len() {
+        let value = match size {
+          1 => data[i + 3] as i32,
+          2 => u16::from_le_bytes([data[i + 3], data[i + 4]]) as i32,
+          _ => continue,
+        };
+        if value > 0 && value < 10000 {
+          width = Some(value);
+        }
+      }
+    }
+
+    // Check for DisplayHeight (0x54BA)
+    if data[i] == 0x54 && i + 4 < data.len() && data[i + 1] == 0xBA {
+      // Element ID: 0x54BA
+      // Size descriptor: data[i+2]
+      let size = match data[i + 2] {
+        0x81 => 1, // 1 byte size
+        0x82 => 2, // 2 byte size
+        _ => continue,
+      };
+
+      if i + 3 + size <= data.len() {
+        let value = match size {
+          1 => data[i + 3] as i32,
+          2 => u16::from_le_bytes([data[i + 3], data[i + 4]]) as i32,
+          _ => continue,
+        };
+        if value > 0 && value < 10000 {
+          height = Some(value);
+        }
+      }
+    }
+
+    i += 1;
+  }
+
+  (width, height)
 }
 
 /// Detect codec from Y4M file data

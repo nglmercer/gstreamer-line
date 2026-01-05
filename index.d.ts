@@ -18,6 +18,15 @@ export interface CodecOptions {
   level?: number
 }
 
+/** Extract frames from video file as RGBA buffers */
+export declare function extractFramesAsRgba(inputPath: string, maxFrames?: number | undefined | null): Array<FrameData>
+
+/** Extract frames from video and save directly as images */
+export declare function extractFramesToImages(inputPath: string, outputDir: string, maxFrames?: number | undefined | null, imageFormat?: string | undefined | null): Array<string>
+
+/** Extract frames from video using v_frame */
+export declare function extractFramesWithVFrame(inputPath: string, maxFrames?: number | undefined | null): Array<FrameData>
+
 /** Filter configuration */
 export interface FilterConfig {
   filterString: string
@@ -31,6 +40,14 @@ export interface FormatInfo {
   bitRate?: number
   startTime?: number
   nbStreams: number
+}
+
+/** Extract frames as RGBA buffers */
+export interface FrameData {
+  frameNumber: number
+  width: number
+  height: number
+  rgbaData: Array<number>
 }
 
 /**
@@ -94,6 +111,21 @@ export interface ProgressData {
   fps?: number
   bitRate?: number
   size: number
+}
+
+/** Save frames as image files */
+export declare function saveFramesAsImages(frames: Array<FrameData>, options: SaveFramesOptions): Array<string>
+
+/** Options for saving frames as images */
+export interface SaveFramesOptions {
+  /** Output directory for images */
+  outputDir: string
+  /** Image format (png, jpg, bmp, etc.) */
+  imageFormat?: string
+  /** Prefix for image filenames */
+  filenamePrefix?: string
+  /** Number of digits for frame numbering (e.g., 4 = frame_0001.png) */
+  frameNumberDigits?: number
 }
 
 /** Media stream information */
