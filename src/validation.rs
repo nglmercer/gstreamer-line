@@ -4,7 +4,7 @@
 //! that transcoding operations produce valid output.
 
 use napi_derive::napi;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Validation result for a media file
@@ -272,7 +272,9 @@ pub fn compare_media_files(file1: &PathBuf, file2: &PathBuf) -> Result<String, S
   }
 
   // Compare dimensions
-  if let (Some(w1), Some(h1), Some(w2), Some(h2)) = (result1.width, result1.height, result2.width, result2.height) {
+  if let (Some(w1), Some(h1), Some(w2), Some(h2)) =
+    (result1.width, result1.height, result2.width, result2.height)
+  {
     if w1 != w2 || h1 != h2 {
       comparison.push_str(&format!(
         "Dimensions differ: {}x{} vs {}x{}\n",
@@ -307,7 +309,7 @@ pub fn compare_media_files(file1: &PathBuf, file2: &PathBuf) -> Result<String, S
 }
 
 /// Print validation result to console
-pub fn print_validation_result(result: &ValidationResult, file_path: &PathBuf) {
+pub fn print_validation_result(result: &ValidationResult, file_path: &Path) {
   println!("\n=== Validation Result for {} ===", file_path.display());
   println!("Valid: {}", result.is_valid);
   println!("Format: {}", result.format);

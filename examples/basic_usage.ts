@@ -16,6 +16,7 @@ import {
   getSupportedCodecs,
   getSupportedPixelFormats,
   getSupportedSampleFormats,
+  validateFile,
 } from '../index.js';
 
 import * as fs from 'node:fs';
@@ -103,6 +104,16 @@ try {
   if (fs.existsSync(ivfPath)) {
     const stats = fs.statSync(ivfPath);
     console.log(`  Output file size: ${stats.size} bytes`);
+    
+    // Validate the output file
+    const validationResult = validateFile(ivfPath);
+    console.log(`  Validation: ${validationResult.isValid ? '✓ VALID' : '✗ INVALID'}`);
+    if (!validationResult.isValid) {
+      console.log(`  Errors: ${validationResult.errors.join(', ')}`);
+    }
+    if (validationResult.warnings.length > 0) {
+      console.log(`  Warnings: ${validationResult.warnings.join(', ')}`);
+    }
   }
 } catch (error) {
   console.error('Error transforming format:', error);
@@ -144,6 +155,16 @@ try {
   if (fs.existsSync(matroskaPath)) {
     const stats = fs.statSync(matroskaPath);
     console.log(`  Output file size: ${stats.size} bytes`);
+    
+    // Validate the output file
+    const validationResult = validateFile(matroskaPath);
+    console.log(`  Validation: ${validationResult.isValid ? '✓ VALID' : '✗ INVALID'}`);
+    if (!validationResult.isValid) {
+      console.log(`  Errors: ${validationResult.errors.join(', ')}`);
+    }
+    if (validationResult.warnings.length > 0) {
+      console.log(`  Warnings: ${validationResult.warnings.join(', ')}`);
+    }
   }
 } catch (error) {
   console.error('Error transcoding:', error);

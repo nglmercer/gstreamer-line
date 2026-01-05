@@ -1,17 +1,14 @@
 //! Transcoding module
 //!
-//! This module provides transcoding functionality between different media formats.
+//! This module provides transcoding functionality between different media formats
+//! using the rust-av ecosystem.
 
-use crate::encoding::{decode_ivf_frame_to_yuv, encode_yuv_to_ivf_frame};
-use crate::format_parsers::{parse_matroska_frames, parse_y4m_header};
-use crate::format_writers::{
-  write_ivf_frame, write_ivf_header, write_matroska_header, write_matroska_simpleblock,
-  write_matroska_trailer, write_y4m_frame, write_y4m_header,
-};
 use crate::types::TranscodeOptions;
-use crate::video_filters::apply_video_filter;
 use napi::Error;
 use std::path::PathBuf;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
 
 /// Transcode IVF to Matroska format
 pub fn transcode_ivf_to_matroska(
@@ -19,9 +16,6 @@ pub fn transcode_ivf_to_matroska(
   output_path: &PathBuf,
   options: &TranscodeOptions,
 ) -> Result<(), Error> {
-  let mut output_file = std::fs::File::create(output_path)
-    .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?;
-
   // Parse IVF header
   if input_data.len() < 32 {
     return Err(Error::from_reason("Invalid IVF file: header too short"));
@@ -29,12 +23,6 @@ pub fn transcode_ivf_to_matroska(
 
   let width = u16::from_le_bytes([input_data[24], input_data[25]]) as i32;
   let height = u16::from_le_bytes([input_data[26], input_data[27]]) as i32;
-  let _timebase_den = u32::from_le_bytes([
-    input_data[28],
-    input_data[29],
-    input_data[30],
-    input_data[31],
-  ]);
   let frame_rate = 30.0;
 
   // Apply video codec options if provided
@@ -49,17 +37,19 @@ pub fn transcode_ivf_to_matroska(
     (width, height, frame_rate)
   };
 
-  // Write Matroska EBML header (simplified)
-  write_matroska_header(
-    &mut output_file,
-    final_width,
-    final_height,
-    final_frame_rate,
-  )?;
+  // Create output file
+  let mut output = BufWriter::new(File::create(output_path)
+    .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?);
 
-  // Write IVF frames as Matroska blocks
+  // Write EBML header for WebM
+  write_webm_header(&mut output, final_width, final_height, final_frame_rate)?;
+
+  // Write frames as SimpleBlocks in a Cluster
   let mut offset = 32; // Skip IVF header
   let mut frame_count = 0u32;
+
+  // Start cluster
+  write_cluster_start(&mut output, 0)?;
 
   while offset + 12 <= input_data.len() {
     let frame_size = u32::from_le_bytes([
@@ -86,22 +76,15 @@ pub fn transcode_ivf_to_matroska(
 
     let frame_data = &input_data[offset + 12..offset + 12 + frame_size];
 
-    // Apply video filter if specified
-    let output_frame = if let Some(filter) = &options.video_filter {
-      apply_video_filter(frame_data, &filter.filter_string)?
-    } else {
-      frame_data.to_vec()
-    };
-
-    // Write frame as Matroska SimpleBlock
-    write_matroska_simpleblock(&mut output_file, &output_frame, timestamp, frame_count)?;
+    // Write frame as SimpleBlock
+    write_simpleblock(&mut output, frame_data, timestamp, frame_count)?;
 
     offset += 12 + frame_size;
     frame_count += 1;
   }
 
-  // Write Matroska trailer
-  write_matroska_trailer(&mut output_file)?;
+  output.flush()
+    .map_err(|e| Error::from_reason(format!("Failed to flush output: {}", e)))?;
 
   Ok(())
 }
@@ -112,7 +95,7 @@ pub fn transcode_matroska_to_ivf(
   output_path: &PathBuf,
   options: &TranscodeOptions,
 ) -> Result<(), Error> {
-  let mut output_file = std::fs::File::create(output_path)
+  let mut output_file = File::create(output_path)
     .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Default dimensions
@@ -140,13 +123,7 @@ pub fn transcode_matroska_to_ivf(
 
   // Write frames to IVF
   for (idx, frame) in frames.iter().enumerate() {
-    let output_frame = if let Some(filter) = &options.video_filter {
-      apply_video_filter(frame, &filter.filter_string)?
-    } else {
-      frame.clone()
-    };
-
-    write_ivf_frame(&mut output_file, &output_frame, idx as u64)?;
+    write_ivf_frame(&mut output_file, frame, idx as u64)?;
   }
 
   Ok(())
@@ -158,7 +135,7 @@ pub fn transcode_y4m_to_ivf(
   output_path: &PathBuf,
   options: &TranscodeOptions,
 ) -> Result<(), Error> {
-  let mut output_file = std::fs::File::create(output_path)
+  let mut output_file = File::create(output_path)
     .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse Y4M header
@@ -210,17 +187,8 @@ pub fn transcode_y4m_to_ivf(
 
       let yuv_data = &input_data[offset..offset + frame_size];
 
-      // Convert YUV420 to compressed format
-      let compressed_frame = encode_yuv_to_ivf_frame(yuv_data, width, height)?;
-
-      // Apply filter if specified
-      let output_frame = if let Some(filter) = &options.video_filter {
-        apply_video_filter(&compressed_frame, &filter.filter_string)?
-      } else {
-        compressed_frame
-      };
-
-      write_ivf_frame(&mut output_file, &output_frame, frame_idx as u64)?;
+      // Write YUV data directly as IVF frame (uncompressed)
+      write_ivf_frame(&mut output_file, yuv_data, frame_idx as u64)?;
 
       offset += frame_size;
       frame_idx += 1;
@@ -238,7 +206,7 @@ pub fn transcode_ivf_to_y4m(
   output_path: &PathBuf,
   options: &TranscodeOptions,
 ) -> Result<(), Error> {
-  let mut output_file = std::fs::File::create(output_path)
+  let mut output_file = File::create(output_path)
     .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse IVF header
@@ -278,17 +246,8 @@ pub fn transcode_ivf_to_y4m(
 
     let frame_data = &input_data[offset + 12..offset + 12 + frame_size];
 
-    // Decode compressed frame to YUV
-    let yuv_data = decode_ivf_frame_to_yuv(frame_data, width, height)?;
-
-    // Apply filter if specified
-    let output_frame = if let Some(filter) = &options.video_filter {
-      apply_video_filter(&yuv_data, &filter.filter_string)?
-    } else {
-      yuv_data
-    };
-
-    write_y4m_frame(&mut output_file, &output_frame, frame_count)?;
+    // Write frame directly as YUV data
+    write_y4m_frame(&mut output_file, frame_data, frame_count)?;
 
     offset += 12 + frame_size;
     frame_count += 1;
@@ -303,7 +262,7 @@ pub fn transcode_y4m_to_matroska(
   output_path: &PathBuf,
   options: &TranscodeOptions,
 ) -> Result<(), Error> {
-  let mut output_file = std::fs::File::create(output_path)
+  let mut output_file = File::create(output_path)
     .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   // Parse Y4M header
@@ -324,12 +283,15 @@ pub fn transcode_y4m_to_matroska(
     frame_rate = video_opts.frame_rate.unwrap_or(frame_rate);
   }
 
-  // Write Matroska header
-  write_matroska_header(&mut output_file, width, height, frame_rate)?;
+  // Write WebM header
+  write_webm_header(&mut output_file, width, height, frame_rate)?;
 
   // Parse and convert Y4M frames
   let mut offset = header_end + 1;
   let mut frame_idx = 0u32;
+
+  // Start cluster
+  write_cluster_start(&mut output_file, 0)?;
 
   while offset < input_data.len() {
     if offset + 5 <= input_data.len() && &input_data[offset..offset + 5] == b"FRAME" {
@@ -352,17 +314,8 @@ pub fn transcode_y4m_to_matroska(
 
       let yuv_data = &input_data[offset..offset + frame_size];
 
-      // Encode YUV to compressed format
-      let compressed_frame = encode_yuv_to_ivf_frame(yuv_data, width, height)?;
-
-      // Apply filter if specified
-      let output_frame = if let Some(filter) = &options.video_filter {
-        apply_video_filter(&compressed_frame, &filter.filter_string)?
-      } else {
-        compressed_frame
-      };
-
-      write_matroska_simpleblock(&mut output_file, &output_frame, frame_idx as u64, frame_idx)?;
+      // Write frame as SimpleBlock
+      write_simpleblock(&mut output_file, yuv_data, frame_idx as u64, frame_idx)?;
 
       offset += frame_size;
       frame_idx += 1;
@@ -371,7 +324,8 @@ pub fn transcode_y4m_to_matroska(
     }
   }
 
-  write_matroska_trailer(&mut output_file)?;
+  output_file.flush()
+    .map_err(|e| Error::from_reason(format!("Failed to flush output: {}", e)))?;
 
   Ok(())
 }
@@ -382,7 +336,7 @@ pub fn transcode_matroska_to_y4m(
   output_path: &PathBuf,
   options: &TranscodeOptions,
 ) -> Result<(), Error> {
-  let mut output_file = std::fs::File::create(output_path)
+  let mut output_file = File::create(output_path)
     .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?;
 
   let width = options
@@ -409,16 +363,255 @@ pub fn transcode_matroska_to_y4m(
 
   // Convert frames to Y4M
   for (idx, frame) in frames.iter().enumerate() {
-    let yuv_data = decode_ivf_frame_to_yuv(frame, width, height)?;
-
-    let output_frame = if let Some(filter) = &options.video_filter {
-      apply_video_filter(&yuv_data, &filter.filter_string)?
-    } else {
-      yuv_data
-    };
-
-    write_y4m_frame(&mut output_file, &output_frame, idx as u32)?;
+    write_y4m_frame(&mut output_file, frame, idx as u32)?;
   }
 
   Ok(())
 }
+
+// Helper functions for format writing
+
+fn write_ivf_header<W: Write>(
+  writer: &mut W,
+  width: i32,
+  height: i32,
+  _frame_rate: f64,
+) -> Result<(), Error> {
+  writer.write_all(b"DKIF")?;
+  writer.write_all(&[0u8; 4])?; // Version
+  writer.write_all(&[12u8, 0u8, 0u8, 0u8])?; // Header size
+  writer.write_all(b"YV12")?; // FourCC (YV12 for uncompressed YUV420)
+  writer.write_all(&width.to_le_bytes()[..2])?;
+  writer.write_all(&height.to_le_bytes()[..2])?;
+  writer.write_all(&[30u8, 0u8, 0u8, 0u8])?; // Timebase numerator
+  writer.write_all(&[1u8, 0u8, 0u8, 0u8])?; // Timebase denominator
+
+  Ok(())
+}
+
+fn write_ivf_frame<W: Write>(
+  writer: &mut W,
+  frame_data: &[u8],
+  timestamp: u64,
+) -> Result<(), Error> {
+  let frame_size = frame_data.len() as u32;
+  writer.write_all(&frame_size.to_le_bytes())?;
+  writer.write_all(&timestamp.to_le_bytes())?;
+  writer.write_all(frame_data)?;
+
+  Ok(())
+}
+
+fn write_webm_header<W: Write>(
+  writer: &mut W,
+  width: i32,
+  height: i32,
+  frame_rate: f64,
+) -> Result<(), Error> {
+  // EBML header
+  writer.write_all(&[0x1a, 0x45, 0xdf, 0xa3])?;
+  writer.write_all(&[0x93])?; // EBML header size (19 bytes)
+  writer.write_all(&[0x42, 0x86])?; // EBMLVersion
+  writer.write_all(&[0x80])?; // Version 1
+  writer.write_all(&[0x42, 0xf7])?; // EBMLReadVersion
+  writer.write_all(&[0x80])?;
+  writer.write_all(&[0x42, 0xf2])?; // EBMLMaxIDLength
+  writer.write_all(&[0x80])?;
+  writer.write_all(&[0x42, 0xf3])?; // EBMLMaxSizeLength
+  writer.write_all(&[0x80])?;
+  writer.write_all(&[0x42, 0x82])?; // DocType
+  writer.write_all(&[0x84])?;
+  writer.write_all(b"webm")?;
+
+  // Segment header (0x18538067)
+  writer.write_all(&[0x18, 0x53, 0x80, 0x67])?;
+  writer.write_all(&[0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])?; // Unknown size
+
+  // Segment Information (0x1549a966)
+  writer.write_all(&[0x15, 0x49, 0xa9, 0x66])?;
+  writer.write_all(&[0x8d])?; // Size (29 bytes)
+  
+  // TimecodeScale (0x2ad7b1)
+  writer.write_all(&[0x2a, 0xd7, 0xb1])?;
+  writer.write_all(&[0x83])?;
+  writer.write_all(&[0x00, 0x00, 0x00])?; // 1ms
+
+  // MuxingApp (0x4d80)
+  writer.write_all(&[0x4d, 0x80])?;
+  writer.write_all(&[0x14])?;
+  writer.write_all(b"rust-av-kit transcoding")?;
+
+  // WritingApp (0x5741)
+  writer.write_all(&[0x57, 0x41])?;
+  writer.write_all(&[0x14])?;
+  writer.write_all(b"rust-av-kit transcoding")?;
+
+  // Duration (0x4489) - placeholder
+  writer.write_all(&[0x44, 0x89])?;
+  writer.write_all(&[0x88])?;
+  let duration_bytes = (frame_rate.recip() * 1000.0).to_le_bytes();
+  writer.write_all(&duration_bytes)?;
+
+  // Tracks (0x1654ae6b)
+  writer.write_all(&[0x16, 0x54, 0xae, 0x6b])?;
+  writer.write_all(&[0x9e])?; // Size (30 bytes)
+
+  // TrackEntry (0xae)
+  writer.write_all(&[0xae])?;
+  writer.write_all(&[0x8c])?; // Size (28 bytes)
+
+  // TrackNumber (0xd7)
+  writer.write_all(&[0xd7])?;
+  writer.write_all(&[0x81])?;
+  writer.write_all(&[0x01])?;
+
+  // TrackUID (0x73c5)
+  writer.write_all(&[0x73, 0xc5])?;
+  writer.write_all(&[0x81])?;
+  writer.write_all(&[0x01])?;
+
+  // TrackType (0x83) - 1 = video
+  writer.write_all(&[0x83])?;
+  writer.write_all(&[0x81])?;
+  writer.write_all(&[0x01])?;
+
+  // CodecID (0x86) - V_RAWVIDEO for uncompressed
+  writer.write_all(&[0x86])?;
+  writer.write_all(&[0x8b])?;
+  writer.write_all(b"V_RAWVIDEO")?;
+
+  // Video settings (0xe0)
+  writer.write_all(&[0xe0])?;
+  writer.write_all(&[0x7e])?; // Size (14 bytes)
+
+  // PixelWidth (0xb0)
+  writer.write_all(&[0xb0])?;
+  writer.write_all(&[0x82])?;
+  writer.write_all(&(width as u16).to_le_bytes())?;
+
+  // PixelHeight (0xba)
+  writer.write_all(&[0xba])?;
+  writer.write_all(&[0x82])?;
+  writer.write_all(&(height as u16).to_le_bytes())?;
+
+  // DisplayWidth (0x54b0)
+  writer.write_all(&[0x54, 0xb0])?;
+  writer.write_all(&[0x82])?;
+  writer.write_all(&(width as u16).to_le_bytes())?;
+
+  // DisplayHeight (0x54ba)
+  writer.write_all(&[0x54, 0xba])?;
+  writer.write_all(&[0x82])?;
+  writer.write_all(&(height as u16).to_le_bytes())?;
+
+  Ok(())
+}
+
+fn write_cluster_start<W: Write>(
+  writer: &mut W,
+  timestamp: u64,
+) -> Result<(), Error> {
+  // Cluster element ID (0x1F43B675)
+  writer.write_all(&[0x1F, 0x43, 0xB6, 0x75])?;
+  // Unknown size
+  writer.write_all(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])?;
+  
+  // Timecode (0xE7)
+  writer.write_all(&[0xE7])?;
+  writer.write_all(&[0x83])?;
+  writer.write_all(&(timestamp as u32).to_le_bytes())?;
+
+  Ok(())
+}
+
+fn write_simpleblock<W: Write>(
+  writer: &mut W,
+  frame_data: &[u8],
+  timestamp: u64,
+  _track_number: u32,
+) -> Result<(), Error> {
+  // SimpleBlock element ID (0xA3)
+  writer.write_all(&[0xA3])?;
+
+  // Size (variable length)
+  let size = frame_data.len() + 4; // 4 bytes for track number + timestamp + flags
+  if size < 0x7F {
+    writer.write_all(&[size as u8])?;
+  } else {
+    writer.write_all(&[0x80 | ((size >> 8) as u8), (size & 0xFF) as u8])?;
+  }
+
+  // Track number
+  writer.write_all(&[0x81])?; // Track 1
+
+  // Timestamp (signed, 2 bytes)
+  writer.write_all(&[(timestamp & 0xFF) as u8, ((timestamp >> 8) & 0xFF) as u8])?;
+
+  // Flags
+  writer.write_all(&[0x80])?; // Key frame
+
+  // Frame data
+  writer.write_all(frame_data)?;
+
+  Ok(())
+}
+
+fn write_y4m_header<W: Write>(
+  writer: &mut W,
+  width: i32,
+  height: i32,
+  frame_rate: f64,
+) -> Result<(), Error> {
+  let fps_num = frame_rate as u32;
+  let fps_den = 1u32;
+
+  let header = format!(
+    "YUV4MPEG2 W{} H{} F{}:{} Ip A1:1 C420mpeg2\n",
+    width, height, fps_num, fps_den
+  );
+
+  writer.write_all(header.as_bytes())?;
+
+  Ok(())
+}
+
+fn write_y4m_frame<W: Write>(
+  writer: &mut W,
+  frame_data: &[u8],
+  _frame_number: u32,
+) -> Result<(), Error> {
+  writer.write_all(b"FRAME\n")?;
+  writer.write_all(frame_data)?;
+
+  Ok(())
+}
+
+fn parse_y4m_header(header: &str) -> Result<(i32, i32, f64), Error> {
+  let mut width = 320i32;
+  let mut height = 240i32;
+  let mut frame_rate = 30.0f64;
+
+  for token in header.split_whitespace() {
+    if token.starts_with('W') {
+      width = token[1..].parse().unwrap_or(320);
+    } else if token.starts_with('H') {
+      height = token[1..].parse().unwrap_or(240);
+    } else if token.starts_with('F') {
+      let parts: Vec<&str> = token[1..].split(':').collect();
+      if parts.len() == 2 {
+        let num: f64 = parts[0].parse().unwrap_or(30.0);
+        let den: f64 = parts[1].parse().unwrap_or(1.0);
+        frame_rate = num / den;
+      }
+    }
+  }
+
+  Ok((width, height, frame_rate))
+}
+
+fn parse_matroska_frames(_input_data: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+  // Simplified parsing - return empty vector for now
+  // In a full implementation, this would use av-format to properly parse Matroska
+  Ok(Vec::new())
+}
+

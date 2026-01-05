@@ -17,7 +17,7 @@ pub use media::*;
 pub use types::*;
 
 // Explicit re-exports to avoid ambiguity
-pub use validation::{validate_file, ValidationResult, validate_media_file};
+pub use validation::{validate_file, validate_media_file, ValidationResult};
 
 use codec_detection::{detect_codec_from_data, estimate_duration};
 use napi_derive::napi;

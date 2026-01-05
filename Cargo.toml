@@ -29,7 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [features]
-default = []
+default = ["matroska-support"]
 full-codecs = ["matroska", "av-vorbis", "libopus", "libvpx"]
 matroska-support = ["matroska"]
 
