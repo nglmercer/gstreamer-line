@@ -4,6 +4,7 @@
 //! using the rust-av ecosystem.
 
 use crate::types::TranscodeOptions;
+use crate::video_encoding::VideoCodec;
 use image::{RgbImage, RgbaImage};
 use napi::Error;
 use napi_derive::napi;
@@ -467,6 +468,15 @@ pub fn transcode_ivf_to_matroska(
   let height = u16::from_le_bytes([input_data[26], input_data[27]]) as i32;
   let frame_rate = 30.0;
 
+  // Detect codec from IVF FourCC
+  let fourcc = &input_data[16..20];
+  let codec = match fourcc {
+    b"AV01" => VideoCodec::Av1,
+    b"VP90" => VideoCodec::Vp9,
+    b"VP80" => VideoCodec::Vp8,
+    _ => VideoCodec::Vp9, // Default to VP9
+  };
+
   // Apply video codec options if provided
   let (final_width, final_height, final_frame_rate) = if let Some(video_opts) = &options.video_codec
   {
@@ -479,18 +489,29 @@ pub fn transcode_ivf_to_matroska(
     (width, height, frame_rate)
   };
 
+  // Generate CodecPrivate data for the codec
+  let codec_private = generate_codec_private(codec, final_width, final_height);
+
   // Create output file
   let mut output = BufWriter::new(
     File::create(output_path)
       .map_err(|e| Error::from_reason(format!("Failed to create output file: {}", e)))?,
   );
 
-  // Write EBML header for WebM
-  write_webm_header(&mut output, final_width, final_height, final_frame_rate)?;
+  // Write EBML header for WebM with correct codec ID and CodecPrivate
+  write_webm_header(
+    &mut output,
+    final_width,
+    final_height,
+    final_frame_rate,
+    codec.codec_id(),
+    codec_private.as_deref(),
+  )?;
 
   // Write frames as SimpleBlocks in a Cluster
   let mut offset = 32; // Skip IVF header
   let mut frame_count = 0u32;
+  let timebase = 1_000_000_000u64 / (final_frame_rate as u64); // nanoseconds per frame
 
   // Start cluster
   write_cluster_start(&mut output, 0)?;
@@ -503,7 +524,7 @@ pub fn transcode_ivf_to_matroska(
       input_data[offset + 3],
     ]) as usize;
 
-    let timestamp = u64::from_le_bytes([
+    let ivf_timestamp = u64::from_le_bytes([
       input_data[offset + 4],
       input_data[offset + 5],
       input_data[offset + 6],
@@ -520,8 +541,11 @@ pub fn transcode_ivf_to_matroska(
 
     let frame_data = &input_data[offset + 12..offset + 12 + frame_size];
 
+    // Convert IVF timestamp to Matroska timestamp (in milliseconds)
+    let matroska_timestamp = (ivf_timestamp * timebase / 1_000_000) as u64;
+
     // Write frame as SimpleBlock
-    write_simpleblock(&mut output, frame_data, timestamp, frame_count)?;
+    write_simpleblock(&mut output, frame_data, matroska_timestamp, frame_count)?;
 
     offset += 12 + frame_size;
     frame_count += 1;
@@ -532,6 +556,47 @@ pub fn transcode_ivf_to_matroska(
     .map_err(|e| Error::from_reason(format!("Failed to flush output: {}", e)))?;
 
   Ok(())
+}
+
+/// Generate CodecPrivate data for different codecs
+fn generate_codec_private(codec: VideoCodec, width: i32, height: i32) -> Option<Vec<u8>> {
+  match codec {
+    VideoCodec::Vp9 => {
+      // VP9 CodecPrivate: VP9 config record
+      // https://www.webmproject.org/docs/container/
+      let mut config = Vec::new();
+      config.push(0x01); // Profile
+      config.push(0x00); // Level
+      config.push(0x00); // Bit depth minus 8
+      config.push(0x00); // Chroma subsampling
+      config.push((width & 0xFF) as u8);
+      config.push(((width >> 8) & 0xFF) as u8);
+      config.push((height & 0xFF) as u8);
+      config.push(((height >> 8) & 0xFF) as u8);
+      Some(config)
+    }
+    VideoCodec::Av1 => {
+      // AV1 CodecPrivate: AV1 config OBUs
+      // https://aomediacodec.github.io/av1-isobmff/#av1codecconfigurationbox
+      let mut config = Vec::new();
+      config.push(0x81); // marker (1) + version (7)
+      config.push(0x00); // seq_profile
+      config.push(0x00); // seq_level_idx_0
+      config.push(0x00); // seq_tier_0 (1) + high_bitdepth (1) + twelve_bit (1) + monochrome (1) + chroma_subsampling_x (1) + chroma_subsampling_y (1) + chroma_sample_position (2)
+      config.push(0x00); // reserved (3) + initial_presentation_delay_present (1) + initial_presentation_delay_minus_one (4)
+      Some(config)
+    }
+    VideoCodec::Vp8 => {
+      // VP8 CodecPrivate: VP8 config record
+      let mut config = Vec::new();
+      config.push(0x00); // version
+      config.push(0x00); // show_frame (1) + clamp (1) + type (3) + spatial_resampling (1) + update_segment (1) + update_mb_no_coeffs (1) + error_resilient (1)
+      config.push(0x00); // filter_type (1) + loop_filter_adj_enable (1) + loop_filter_adj (2) + update_segment (1) + update_mb_no_coeffs (1) + error_resilient (1)
+      config.push(0x00); // q_index
+      config.push(0x00); // loop_filter_level
+      Some(config)
+    }
+  }
 }
 
 /// Transcode Matroska to IVF format
@@ -560,8 +625,11 @@ pub fn transcode_matroska_to_ivf(
     .and_then(|v| v.frame_rate)
     .unwrap_or(30.0);
 
-  // Write IVF header
-  write_ivf_header(&mut output_file, width, height, frame_rate)?;
+  // Determine codec (default to VP9)
+  let codec = VideoCodec::Vp9;
+
+  // Write IVF header with correct FourCC
+  write_ivf_header(&mut output_file, width, height, frame_rate, codec.fourcc())?;
 
   // Parse Matroska and extract frames
   let frames = parse_matroska_frames(input_data)?;
@@ -601,8 +669,11 @@ pub fn transcode_y4m_to_ivf(
     frame_rate = video_opts.frame_rate.unwrap_or(frame_rate);
   }
 
-  // Write IVF header
-  write_ivf_header(&mut output_file, width, height, frame_rate)?;
+  // Determine codec (default to VP9)
+  let codec = VideoCodec::Vp9;
+
+  // Write IVF header with correct FourCC
+  write_ivf_header(&mut output_file, width, height, frame_rate, codec.fourcc())?;
 
   // Parse and convert Y4M frames
   let mut offset = header_end + 1;
@@ -728,8 +799,21 @@ pub fn transcode_y4m_to_matroska(
     frame_rate = video_opts.frame_rate.unwrap_or(frame_rate);
   }
 
-  // Write WebM header
-  write_webm_header(&mut output_file, width, height, frame_rate)?;
+  // Determine codec (default to VP9)
+  let codec = VideoCodec::Vp9;
+
+  // Generate CodecPrivate data
+  let codec_private = generate_codec_private(codec, width, height);
+
+  // Write WebM header with correct codec ID and CodecPrivate
+  write_webm_header(
+    &mut output_file,
+    width,
+    height,
+    frame_rate,
+    codec.codec_id(),
+    codec_private.as_deref(),
+  )?;
 
   // Parse and convert Y4M frames
   let mut offset = header_end + 1;
@@ -759,7 +843,7 @@ pub fn transcode_y4m_to_matroska(
 
       let yuv_data = &input_data[offset..offset + frame_size];
 
-      // Write frame as SimpleBlock
+      // Write frame as SimpleBlock with correct timestamp
       write_simpleblock(&mut output_file, yuv_data, frame_idx as u64, frame_idx)?;
 
       offset += frame_size;
@@ -821,15 +905,16 @@ fn write_ivf_header<W: Write>(
   writer: &mut W,
   width: i32,
   height: i32,
-  _frame_rate: f64,
+  frame_rate: f64,
+  fourcc: [u8; 4],
 ) -> Result<(), Error> {
   writer.write_all(b"DKIF")?;
   writer.write_all(&[0u8; 4])?; // Version
   writer.write_all(&[12u8, 0u8, 0u8, 0u8])?; // Header size
-  writer.write_all(b"YV12")?; // FourCC (YV12 for uncompressed YUV420)
+  writer.write_all(&fourcc)?; // FourCC (VP90, AV01, VP80, etc.)
   writer.write_all(&width.to_le_bytes()[..2])?;
   writer.write_all(&height.to_le_bytes()[..2])?;
-  writer.write_all(&[30u8, 0u8, 0u8, 0u8])?; // Timebase numerator
+  writer.write_all(&[(frame_rate as u32).to_le_bytes()[0], 0u8, 0u8, 0u8])?; // Timebase numerator
   writer.write_all(&[1u8, 0u8, 0u8, 0u8])?; // Timebase denominator
 
   Ok(())
@@ -853,6 +938,8 @@ fn write_webm_header<W: Write>(
   width: i32,
   height: i32,
   frame_rate: f64,
+  codec_id: &str,
+  codec_private: Option<&[u8]>,
 ) -> Result<(), Error> {
   // EBML header
   writer.write_all(&[0x1a, 0x45, 0xdf, 0xa3])?;
@@ -898,13 +985,15 @@ fn write_webm_header<W: Write>(
   let duration_bytes = (frame_rate.recip() * 1000.0).to_le_bytes();
   writer.write_all(&duration_bytes)?;
 
-  // Tracks (0x1654ae6b)
+  // Tracks (0x1654ae6b) - Calculate size dynamically
+  let track_entry_size = 28 + codec_private.map(|p| p.len() + 4).unwrap_or(0); // Base + CodecPrivate
+  let tracks_size = 2 + track_entry_size; // TrackEntry ID + size
   writer.write_all(&[0x16, 0x54, 0xae, 0x6b])?;
-  writer.write_all(&[0x9e])?; // Size (30 bytes)
+  write_vint(writer, tracks_size as u64)?;
 
   // TrackEntry (0xae)
   writer.write_all(&[0xae])?;
-  writer.write_all(&[0x8c])?; // Size (28 bytes)
+  write_vint(writer, track_entry_size as u64)?;
 
   // TrackNumber (0xd7)
   writer.write_all(&[0xd7])?;
@@ -921,10 +1010,18 @@ fn write_webm_header<W: Write>(
   writer.write_all(&[0x81])?;
   writer.write_all(&[0x01])?;
 
-  // CodecID (0x86) - V_RAWVIDEO for uncompressed
+  // CodecID (0x86) - V_VP9, V_AV1, V_VP8, etc.
   writer.write_all(&[0x86])?;
-  writer.write_all(&[0x8b])?;
-  writer.write_all(b"V_RAWVIDEO")?;
+  let codec_id_bytes = codec_id.as_bytes();
+  writer.write_all(&[codec_id_bytes.len() as u8])?;
+  writer.write_all(codec_id_bytes)?;
+
+  // CodecPrivate (0x63A2) - Required for VP9/AV1
+  if let Some(private_data) = codec_private {
+    writer.write_all(&[0x63, 0xa2])?;
+    write_vint(writer, private_data.len() as u64)?;
+    writer.write_all(private_data)?;
+  }
 
   // Video settings (0xe0)
   writer.write_all(&[0xe0])?;
@@ -950,6 +1047,37 @@ fn write_webm_header<W: Write>(
   writer.write_all(&[0x82])?;
   writer.write_all(&(height as u16).to_le_bytes())?;
 
+  Ok(())
+}
+
+/// Write variable-length integer (VINT)
+fn write_vint<W: Write>(writer: &mut W, value: u64) -> Result<(), Error> {
+  if value < 0x7F {
+    writer.write_all(&[value as u8])?;
+  } else if value < 0x3FFF {
+    writer.write_all(&[((value >> 8) | 0x80) as u8, (value & 0xFF) as u8])?;
+  } else if value < 0x1FFFFF {
+    writer.write_all(&[
+      ((value >> 16) | 0x80 | 0x40) as u8,
+      ((value >> 8) & 0xFF) as u8,
+      (value & 0xFF) as u8,
+    ])?;
+  } else if value < 0x0FFFFFFF {
+    writer.write_all(&[
+      ((value >> 24) | 0x80 | 0x40 | 0x20) as u8,
+      ((value >> 16) & 0xFF) as u8,
+      ((value >> 8) & 0xFF) as u8,
+      (value & 0xFF) as u8,
+    ])?;
+  } else {
+    writer.write_all(&[
+      ((value >> 32) | 0x80 | 0x40 | 0x20 | 0x10) as u8,
+      ((value >> 24) & 0xFF) as u8,
+      ((value >> 16) & 0xFF) as u8,
+      ((value >> 8) & 0xFF) as u8,
+      (value & 0xFF) as u8,
+    ])?;
+  }
   Ok(())
 }
 
@@ -987,8 +1115,9 @@ fn write_simpleblock<W: Write>(
   // Track number
   writer.write_all(&[0x81])?; // Track 1
 
-  // Timestamp (signed, 2 bytes)
-  writer.write_all(&[(timestamp & 0xFF) as u8, ((timestamp >> 8) & 0xFF) as u8])?;
+  // Timestamp (signed, 2 bytes) - Matroska uses signed timestamps in SimpleBlock
+  let ts = timestamp as i16;
+  writer.write_all(&[(ts & 0xFF) as u8, ((ts >> 8) & 0xFF) as u8])?;
 
   // Flags
   writer.write_all(&[0x80])?; // Key frame

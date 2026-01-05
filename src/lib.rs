@@ -9,6 +9,7 @@ pub mod media;
 pub mod transcoding;
 pub mod types;
 pub mod validation;
+pub mod video_encoding;
 pub mod video_filters;
 
 pub use codec::*;

@@ -232,7 +232,7 @@ try {
 }
 
 // Calculate duration for 30 frames
-const framesToExtract = 30;
+const framesToExtract = 120;
 const durationSeconds = framesToExtract / frameRate;
 
 console.log(`Extracting first ${framesToExtract} frames from video`);
@@ -287,7 +287,7 @@ const y4mPath5 = getTestVideo('sample_320x240.y4m');
 
 // Extract first 10 frames as RGBA buffers
 try {
-  const frames = extractFramesAsRgba(y4mPath5, 10);
+  const frames = extractFramesAsRgba(y4mPath5, 250);
   console.log(`Extracted ${frames.length} frames as RGBA buffers`);
   
   if (frames.length > 0) {
@@ -313,7 +313,7 @@ const y4mPath6 = getTestVideo('sample_320x240.y4m');
 // Extract frames and save as PNG images
 const outputDir = path.join(__dirname, 'test_files', 'extracted_frames');
 try {
-  const frames = extractFramesAsRgba(y4mPath6, 10);
+  const frames = extractFramesAsRgba(y4mPath6, 120);
   console.log(`Extracted ${frames.length} frames`);
   
   const savedPaths = saveFramesAsImages(frames, {
@@ -346,7 +346,7 @@ try {
   const savedPaths = extractFramesToImages(
     y4mPath7,
     outputDir2,
-    10, // Extract first 10 frames
+    120, // Extract first 10 frames
     'jpg'
   );
   
@@ -369,7 +369,7 @@ const y4mPath8 = getTestVideo('sample_320x240.y4m');
 
 // Extract frames using v_frame library
 try {
-  const frames = extractFramesWithVFrame(y4mPath8, 10);
+  const frames = extractFramesWithVFrame(y4mPath8, 120);
   console.log(`Extracted ${frames.length} frames using v_frame`);
   
   if (frames.length > 0) {

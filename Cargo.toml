@@ -20,20 +20,21 @@ av-format = "0.7"
 v_frame = "0.3"
 # Image encoding for saving frames
 image = "0.24"
-# Matroska/WebM support from rust-av
-matroska = { version = "0.1.0", git = "https://github.com/rust-av/matroska", optional = true }
-# Codec support (optional - requires system libraries)
-av-vorbis = { git = "https://github.com/rust-av/av-vorbis", optional = true }
-libopus = { version = "0.1.0", git = "https://github.com/rust-av/opus-rs", features = ["codec-trait"], optional = true }
-libvpx = { version = "0.1.0", git = "https://github.com/rust-av/vpx-rs", features = ["codec-trait"], optional = true }
+# Matroska/WebM support
+matroska = { version = "0.1.0", git = "https://github.com/rust-av/matroska" }
+# Codec support
+rav1e = { version = "0.7", optional = true }
+libvpx-sys = { version = "1.4", optional = true }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Error handling
+thiserror = "1.0"
 
 [features]
-default = ["matroska-support"]
-full-codecs = ["matroska", "av-vorbis", "libopus", "libvpx"]
-matroska-support = ["matroska"]
+default = []
+av1 = ["rav1e"]
+vp9 = ["libvpx-sys"]
 
 [build-dependencies]
 napi-build = "2"

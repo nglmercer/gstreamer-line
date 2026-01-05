@@ -4,20 +4,21 @@
 
 use std::io::Write;
 
-/// Write IVF header
+/// Write IVF header with codec FourCC
 pub fn write_ivf_header<W: Write>(
   writer: &mut W,
   width: i32,
   height: i32,
-  _frame_rate: f64,
+  frame_rate: f64,
+  fourcc: [u8; 4],
 ) -> Result<(), napi::Error> {
   writer.write_all(b"DKIF")?;
   writer.write_all(&[0u8; 4])?; // Version
   writer.write_all(&[12u8, 0u8, 0u8, 0u8])?; // Header size
-  writer.write_all(b"YV12")?; // FourCC (YV12 for uncompressed YUV420)
+  writer.write_all(&fourcc)?; // FourCC (VP90, AV01, VP80, etc.)
   writer.write_all(&width.to_le_bytes()[..2])?;
   writer.write_all(&height.to_le_bytes()[..2])?;
-  writer.write_all(&[30u8, 0u8, 0u8, 0u8])?; // Timebase numerator
+  writer.write_all(&[(frame_rate as u32).to_le_bytes()[0], 0u8, 0u8, 0u8])?; // Timebase numerator
   writer.write_all(&[1u8, 0u8, 0u8, 0u8])?; // Timebase denominator
 
   Ok(())
@@ -37,12 +38,14 @@ pub fn write_ivf_frame<W: Write>(
   Ok(())
 }
 
-/// Write Matroska header
+/// Write Matroska header with codec ID and CodecPrivate data
 pub fn write_matroska_header<W: Write>(
   writer: &mut W,
   width: i32,
   height: i32,
   frame_rate: f64,
+  codec_id: &str,
+  codec_private: Option<&[u8]>,
 ) -> Result<(), napi::Error> {
   // EBML header
   writer.write_all(&[0x1a, 0x45, 0xdf, 0xa3])?;
@@ -88,13 +91,15 @@ pub fn write_matroska_header<W: Write>(
   let duration_bytes = (frame_rate.recip() * 1000.0).to_le_bytes();
   writer.write_all(&duration_bytes)?;
 
-  // Tracks (0x1654ae6b)
+  // Tracks (0x1654ae6b) - Calculate size dynamically
+  let track_entry_size = 28 + codec_private.map(|p| p.len() + 4).unwrap_or(0); // Base + CodecPrivate
+  let tracks_size = 2 + track_entry_size; // TrackEntry ID + size
   writer.write_all(&[0x16, 0x54, 0xae, 0x6b])?;
-  writer.write_all(&[0x9e])?; // Size (30 bytes)
+  write_vint(writer, tracks_size as u64)?;
 
   // TrackEntry (0xae)
   writer.write_all(&[0xae])?;
-  writer.write_all(&[0x8c])?; // Size (28 bytes)
+  write_vint(writer, track_entry_size as u64)?;
 
   // TrackNumber (0xd7)
   writer.write_all(&[0xd7])?;
@@ -111,10 +116,18 @@ pub fn write_matroska_header<W: Write>(
   writer.write_all(&[0x81])?;
   writer.write_all(&[0x01])?;
 
-  // CodecID (0x86) - V_RAWVIDEO for uncompressed
+  // CodecID (0x86) - V_VP9, V_AV1, V_VP8, etc.
   writer.write_all(&[0x86])?;
-  writer.write_all(&[0x8b])?;
-  writer.write_all(b"V_RAWVIDEO")?;
+  let codec_id_bytes = codec_id.as_bytes();
+  writer.write_all(&[codec_id_bytes.len() as u8])?;
+  writer.write_all(codec_id_bytes)?;
+
+  // CodecPrivate (0x63A2) - Required for VP9/AV1
+  if let Some(private_data) = codec_private {
+    writer.write_all(&[0x63, 0xa2])?;
+    write_vint(writer, private_data.len() as u64)?;
+    writer.write_all(private_data)?;
+  }
 
   // Video settings (0xe0)
   writer.write_all(&[0xe0])?;
@@ -140,6 +153,37 @@ pub fn write_matroska_header<W: Write>(
   writer.write_all(&[0x82])?;
   writer.write_all(&(height as u16).to_le_bytes())?;
 
+  Ok(())
+}
+
+/// Write variable-length integer (VINT)
+fn write_vint<W: Write>(writer: &mut W, value: u64) -> Result<(), napi::Error> {
+  if value < 0x7F {
+    writer.write_all(&[value as u8])?;
+  } else if value < 0x3FFF {
+    writer.write_all(&[((value >> 8) | 0x80) as u8, (value & 0xFF) as u8])?;
+  } else if value < 0x1FFFFF {
+    writer.write_all(&[
+      ((value >> 16) | 0x80 | 0x40) as u8,
+      ((value >> 8) & 0xFF) as u8,
+      (value & 0xFF) as u8,
+    ])?;
+  } else if value < 0x0FFFFFFF {
+    writer.write_all(&[
+      ((value >> 24) | 0x80 | 0x40 | 0x20) as u8,
+      ((value >> 16) & 0xFF) as u8,
+      ((value >> 8) & 0xFF) as u8,
+      (value & 0xFF) as u8,
+    ])?;
+  } else {
+    writer.write_all(&[
+      ((value >> 32) | 0x80 | 0x40 | 0x20 | 0x10) as u8,
+      ((value >> 24) & 0xFF) as u8,
+      ((value >> 16) & 0xFF) as u8,
+      ((value >> 8) & 0xFF) as u8,
+      (value & 0xFF) as u8,
+    ])?;
+  }
   Ok(())
 }
 
